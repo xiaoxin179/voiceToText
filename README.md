@@ -144,7 +144,7 @@ UI 可以支持两种显示方式：
 5. 确认两路音频都能正常录到。
 6. 接入 `faster-whisper`，先对录音文件转写。
 7. 改成按 1-3 秒音频块准实时转写。
-8. 增加 PySide6 界面，提供监听模式选择和文本显示。
+8. 增加 PyQt6 界面，提供监听模式选择和文本显示。
 
 ## 初始依赖
 
@@ -191,6 +191,12 @@ pip install -r requirements-ui.txt
 start_gui.bat
 ```
 
+首次使用前建议先双击模型初始化文件，提前下载模型：
+
+```text
+init_models.bat
+```
+
 也可以双击带菜单的启动文件：
 
 ```text
@@ -206,6 +212,96 @@ start_voice_to_text.bat
 - 音频设备列表
 - 5 秒录音测试
 - CUDA 运行库依赖安装
+- Whisper 模型下载
+
+## 模型初始化
+
+`faster-whisper` 第一次使用某个模型时会从 HuggingFace Hub 下载模型文件。控制台出现下面这句不是错误：
+
+```text
+Warning: You are sending unauthenticated requests to the HF Hub.
+```
+
+意思是当前没有配置 `HF_TOKEN`，所以使用匿名请求下载。匿名下载可以用，但可能更慢或被限速。
+
+模型默认下载到当前 Windows 用户的 HuggingFace 缓存目录：
+
+```text
+C:\Users\<你的用户名>\.cache\huggingface\hub\
+```
+
+本机对应路径是：
+
+```text
+C:\Users\dgy30\.cache\huggingface\hub\
+```
+
+程序启动时会强制检查必需模型缓存。默认必需模型是：
+
+```text
+tiny, medium
+```
+
+如果任意一个模型没有完整缓存，GUI 会直接中断启动，并提示应该运行的下载命令。这样可以避免启动后才偷偷下载模型，导致界面看起来没有反应。
+
+可以用环境变量调整启动时要求检查的模型：
+
+```powershell
+$env:VTT_REQUIRED_MODELS="tiny,medium"
+```
+
+`medium` 模型对应目录是：
+
+```text
+C:\Users\dgy30\.cache\huggingface\hub\models--Systran--faster-whisper-medium
+```
+
+可以提前下载默认模型：
+
+```powershell
+python init_models.py --models tiny medium
+```
+
+也可以下载指定模型：
+
+```powershell
+python init_models.py --models small medium large-v3
+```
+
+如果想下载后顺便验证模型能加载：
+
+```powershell
+python init_models.py --models medium --load-check
+```
+
+如果想手动删除某个模型缓存，可以关闭 GUI 后删除对应目录，例如：
+
+```powershell
+Remove-Item "$env:USERPROFILE\.cache\huggingface\hub\models--Systran--faster-whisper-medium" -Recurse -Force
+Remove-Item "$env:USERPROFILE\.cache\huggingface\hub\.locks\models--Systran--faster-whisper-medium" -Recurse -Force
+```
+
+## 界面调试方法
+
+如果点击“开始监听”后没有文字输出，先看界面底部的“调试日志”。
+
+常见日志含义：
+
+- `model loaded`：模型已经加载完成。
+- `capture started`：对应音频设备已经开始采集。
+- `chunk queued, rms=..., peak=...`：已经采到一段音频。`rms` 和 `peak` 越接近 0，说明声音越小。
+- `skipped, rms=... < min_rms=...`：音量低于静音阈值，被跳过了。可以把界面里的“静音阈值”调低到 `0.00000` 或 `0.00050` 再试。
+- `result: [empty]`：音频送进 ASR 了，但模型没有识别出文字。可能是这段没有人声、音量太小、切片太短，或语言设置不对。
+- `ASR error` / `model load error`：识别引擎报错。如果使用 `cuda`，先切换到 `cpu` + `tiny` 测试核心链路。
+
+建议排查顺序：
+
+1. 先只勾选“麦克风”，推理设备选 `cpu`，模型选 `tiny`，点击“开始监听”。
+2. 对着麦克风持续说话 5-10 秒。
+3. 看调试日志里是否出现 `chunk queued`。
+4. 如果没有 `chunk queued`，说明采集设备没有正常工作，尝试切换“麦克风设备”。
+5. 如果有 `chunk queued` 但 `rms` 很低，调低“静音阈值”或提高系统麦克风音量。
+6. 如果 CPU 模式正常，再切换到 `cuda` 测试 GPU。
 
 检查 Python、依赖、CUDA 和默认音频设备：
 

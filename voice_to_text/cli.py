@@ -127,7 +127,7 @@ def cmd_transcribe_file(args: argparse.Namespace) -> int:
             "`pip install faster-whisper` inside the conda environment."
         ) from exc
 
-    model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
+    model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type, local_files_only=True)
     segments, info = model.transcribe(
         str(args.audio_file),
         language=args.language or None,

@@ -66,8 +66,30 @@ def list_loopback_devices() -> list[AudioDevice]:
 def get_default_microphone() -> AudioDevice:
     pyaudio = _load_pyaudio()
     with pyaudio.PyAudio() as pa:
-        info = pa.get_default_input_device_info()
-        return _to_device(pa, info)
+        default_info = pa.get_default_input_device_info()
+        default_name = str(default_info.get("name", ""))
+
+        # WASAPI input devices cooperate better with WASAPI loopback than MME devices.
+        for info in pa.get_device_info_generator():
+            host_api = _host_api_name(pa, int(info.get("hostApi", 0)))
+            if (
+                host_api == "Windows WASAPI"
+                and int(info.get("maxInputChannels", 0)) > 0
+                and not info.get("isLoopbackDevice", False)
+                and str(info.get("name", "")) in default_name
+            ):
+                return _to_device(pa, info)
+
+        for info in pa.get_device_info_generator():
+            host_api = _host_api_name(pa, int(info.get("hostApi", 0)))
+            if (
+                host_api == "Windows WASAPI"
+                and int(info.get("maxInputChannels", 0)) > 0
+                and not info.get("isLoopbackDevice", False)
+            ):
+                return _to_device(pa, info)
+
+        return _to_device(pa, default_info)
 
 
 def get_default_system_loopback() -> AudioDevice:

@@ -39,6 +39,7 @@ echo [4] Check environment and devices
 echo [5] List audio devices
 echo [6] Record 5 second test wav files
 echo [7] Install CUDA runtime dependencies
+echo [8] Download Whisper models
 echo [0] Exit
 echo.
 set /p "choice=Choose: "
@@ -50,6 +51,7 @@ if "%choice%"=="4" goto doctor
 if "%choice%"=="5" goto devices
 if "%choice%"=="6" goto record_test
 if "%choice%"=="7" goto install_cuda
+if "%choice%"=="8" goto init_models
 if "%choice%"=="0" exit /b 0
 goto menu
 
@@ -98,5 +100,11 @@ cls
 echo Installing CUDA runtime dependencies. This can take a long time.
 echo.
 python -m pip install -r requirements-cuda.txt
+pause
+goto menu
+
+:init_models
+cls
+python init_models.py --models tiny medium
 pause
 goto menu

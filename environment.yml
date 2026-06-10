@@ -12,3 +12,4 @@ dependencies:
       - PyQt6
       - nvidia-cublas-cu12
       - nvidia-cudnn-cu12
+      - opencc-python-reimplemented

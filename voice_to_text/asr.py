@@ -11,6 +11,7 @@ import numpy as np
 from .audio_capture import AudioChunk, AudioSource
 from .cuda_runtime import add_cuda_dll_directories
 from .model_cache import model_cache_summary
+from .text_converter import TextConverter, TextMode
 
 
 @dataclass
@@ -41,6 +42,7 @@ class AsrWorker(threading.Thread):
         language: Optional[str] = "zh",
         vad_filter: bool = True,
         min_rms: float = 0.006,
+        text_mode: TextMode = "simplified",
     ) -> None:
         super().__init__(name="gpu-asr-worker", daemon=True)
         self.input_queue = input_queue
@@ -52,9 +54,11 @@ class AsrWorker(threading.Thread):
         self.language = language
         self.vad_filter = vad_filter
         self.min_rms = min_rms
+        self.text_mode = text_mode
         self._stop_event = threading.Event()
         self.model_ready = threading.Event()
         self._model = None
+        self._text_converter: TextConverter | None = None
         self.last_error: str | None = None
 
     def stop(self) -> None:
@@ -68,9 +72,10 @@ class AsrWorker(threading.Thread):
         try:
             self._debug(
                 f"loading model={self.model_size}, device={self.device}, "
-                f"compute={self.compute_type}, language={self.language or 'auto'}"
+                f"compute={self.compute_type}, language={self.language or 'auto'}, text_mode={self.text_mode}"
             )
             self._debug(model_cache_summary(self.model_size))
+            self._text_converter = TextConverter(self.text_mode)
             self._model = self._load_model()
             self.model_ready.set()
             self._debug("model loaded")
@@ -139,5 +144,7 @@ class AsrWorker(threading.Thread):
             no_speech_threshold=0.6,
         )
         text = "".join(segment.text for segment in segments).strip()
+        if self._text_converter is not None:
+            text = self._text_converter.convert(text)
         self._debug(f"{chunk.source} result: {text or '[empty]'}")
         return text

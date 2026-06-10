@@ -171,6 +171,8 @@ pip install -r requirements.txt
 
 `requirements.txt` 已包含桌面界面、音频采集、faster-whisper、NumPy 兼容版本，以及 GPU 推理需要的 NVIDIA CUDA/cuDNN Python 运行库。
 
+识别后的中文默认会用 OpenCC 统一转换为简体中文。界面里的“文本”选项可以切换为 `简体中文`、`原始输出` 或 `繁体中文`。
+
 ## 当前代码入口
 
 当前已经实现命令行 MVP，入口文件是 `main.py`。

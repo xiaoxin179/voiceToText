@@ -164,6 +164,11 @@ class VoiceToTextWindow(QMainWindow):
         self.language_combo = QComboBox()
         self.language_combo.addItems(["zh", "en", "auto"])
 
+        self.text_mode_combo = QComboBox()
+        self.text_mode_combo.addItem("简体中文", userData="simplified")
+        self.text_mode_combo.addItem("原始输出", userData="original")
+        self.text_mode_combo.addItem("繁体中文", userData="traditional")
+
         self.chunk_seconds = QSpinBox()
         self.chunk_seconds.setRange(1, 10)
         self.chunk_seconds.setValue(2)
@@ -189,6 +194,7 @@ class VoiceToTextWindow(QMainWindow):
         asr_form.addRow("设备", self.device_combo)
         asr_form.addRow("精度", self.compute_combo)
         asr_form.addRow("语言", self.language_combo)
+        asr_form.addRow("文本", self.text_mode_combo)
         asr_form.addRow("切片", self.chunk_seconds)
         asr_form.addRow("静音阈值", self.min_rms)
         sidebar_layout.addLayout(asr_form)
@@ -556,6 +562,7 @@ class VoiceToTextWindow(QMainWindow):
             compute_type=self.compute_combo.currentText(),
             language=language_value,
             min_rms=float(self.min_rms.value()),
+            text_mode=self.text_mode_combo.currentData(),
         )
 
         captures: list[AudioCapture] = []
@@ -590,7 +597,9 @@ class VoiceToTextWindow(QMainWindow):
         self.started_at = time.time()
         self.append_debug(
             f"开始监听: model={self.model_combo.currentText()}, device={self.device_combo.currentText()}, "
-            f"compute={self.compute_combo.currentText()}, chunk={chunk_seconds}s, min_rms={self.min_rms.value():.5f}"
+            f"compute={self.compute_combo.currentText()}, language={language or 'auto'}, "
+            f"text_mode={self.text_mode_combo.currentData()}, chunk={chunk_seconds}s, "
+            f"min_rms={self.min_rms.value():.5f}"
         )
         self.append_debug("正在加载模型，模型加载完成后才会开始采集音频")
         asr_worker.start()
@@ -632,6 +641,7 @@ class VoiceToTextWindow(QMainWindow):
             self.device_combo,
             self.compute_combo,
             self.language_combo,
+            self.text_mode_combo,
             self.chunk_seconds,
             self.min_rms,
         ):

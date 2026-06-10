@@ -17,6 +17,7 @@ from .audio_devices import (
     list_devices,
     list_loopback_devices,
 )
+from .text_converter import TextConverter
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     transcribe.add_argument("--device", default="cuda")
     transcribe.add_argument("--compute-type", default="float16")
     transcribe.add_argument("--language", default="zh")
+    transcribe.add_argument("--text-mode", choices=["simplified", "traditional", "original"], default="simplified")
     transcribe.add_argument("--vad-filter", action=argparse.BooleanOptionalAction, default=True)
 
     listen = subparsers.add_parser("listen", help="Capture audio and transcribe with faster-whisper")
@@ -46,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     listen.add_argument("--device", default="cuda")
     listen.add_argument("--compute-type", default="float16")
     listen.add_argument("--language", default="zh")
+    listen.add_argument("--text-mode", choices=["simplified", "traditional", "original"], default="simplified")
     listen.add_argument("--min-rms", type=float, default=0.006)
 
     return parser
@@ -60,7 +63,14 @@ def _package_version(package: str) -> str:
 
 def cmd_doctor() -> int:
     print(f"Python: {sys.version.split()[0]}")
-    for package in ("pyaudiowpatch", "faster-whisper", "ctranslate2", "numpy", "soundfile"):
+    for package in (
+        "pyaudiowpatch",
+        "faster-whisper",
+        "ctranslate2",
+        "numpy",
+        "soundfile",
+        "opencc-python-reimplemented",
+    ):
         print(f"{package}: {_package_version(package)}")
 
     try:
@@ -137,8 +147,10 @@ def cmd_transcribe_file(args: argparse.Namespace) -> int:
     )
 
     print(f"Language: {info.language} ({info.language_probability:.2f})")
+    text_converter = TextConverter(args.text_mode)
     for segment in segments:
-        print(f"[{segment.start:7.2f}s -> {segment.end:7.2f}s] {segment.text.strip()}")
+        text = text_converter.convert(segment.text.strip())
+        print(f"[{segment.start:7.2f}s -> {segment.end:7.2f}s] {text}")
     return 0
 
 
@@ -180,6 +192,7 @@ def cmd_listen(args: argparse.Namespace) -> int:
         compute_type=args.compute_type,
         language=args.language or None,
         min_rms=args.min_rms,
+        text_mode=args.text_mode,
     )
 
     print("Loading ASR model. First run may download model files.")

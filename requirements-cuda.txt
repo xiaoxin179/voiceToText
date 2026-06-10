@@ -1,2 +1,0 @@
-nvidia-cublas-cu12
-nvidia-cudnn-cu12

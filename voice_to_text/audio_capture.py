@@ -91,6 +91,19 @@ class AudioCapture(threading.Thread):
                 unique.append(channels)
         return unique or [1]
 
+    def _put_latest_chunk(self, chunk: AudioChunk) -> int:
+        dropped = 0
+        while True:
+            try:
+                self.output_queue.put_nowait(chunk)
+                return dropped
+            except queue.Full:
+                try:
+                    self.output_queue.get_nowait()
+                    dropped += 1
+                except queue.Empty:
+                    continue
+
     def run(self) -> None:
         pyaudio = _load_pyaudio()
         source_rate = self.device.default_sample_rate
@@ -124,8 +137,6 @@ class AudioCapture(threading.Thread):
 
                 if stream is None:
                     self._debug("capture error: no supported channel count worked")
-                if stream is None:
-                    self._debug("capture error: no supported channel count worked")
                     return
 
             self._debug("capture started")
@@ -144,7 +155,7 @@ class AudioCapture(threading.Thread):
                     rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
                     peak = float(np.max(np.abs(mono))) if mono.size else 0.0
                     resampled = resample_linear(mono, source_rate, self.target_sample_rate)
-                    self.output_queue.put(
+                    dropped = self._put_latest_chunk(
                         AudioChunk(
                             source=self.source,
                             started_at=started_at,
@@ -153,7 +164,14 @@ class AudioCapture(threading.Thread):
                             samples=resampled,
                         )
                     )
-                    self._debug(f"chunk queued, rms={rms:.5f}, peak={peak:.3f}, queue={self.output_queue.qsize()}")
+                    drop_note = f", dropped_old={dropped}" if dropped else ""
+                    self._debug(
+                        f"chunk queued, rms={rms:.5f}, peak={peak:.3f}, "
+                        f"queue={self.output_queue.qsize()}{drop_note}"
+                    )
+                    elapsed = ended_at - started_at
+                    if elapsed < self.chunk_seconds * 0.9:
+                        time.sleep(self.chunk_seconds - elapsed)
                     frames = []
                     frame_count = 0
                     started_at = time.time()

@@ -169,7 +169,7 @@ def _start_capture_threads(args: argparse.Namespace, audio_queue: queue.Queue[Au
 
 
 def cmd_listen(args: argparse.Namespace) -> int:
-    audio_queue: queue.Queue[AudioChunk] = queue.Queue()
+    audio_queue: queue.Queue[AudioChunk] = queue.Queue(maxsize=6)
     transcript_queue: queue.Queue[Transcript] = queue.Queue()
 
     asr = AsrWorker(

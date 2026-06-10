@@ -2,3 +2,6 @@ faster-whisper
 pyaudiowpatch
 numpy==1.26.4
 soundfile
+PyQt6
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

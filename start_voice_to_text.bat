@@ -38,7 +38,7 @@ echo [3] Start listening - CPU fallback, both microphone and system audio
 echo [4] Check environment and devices
 echo [5] List audio devices
 echo [6] Record 5 second test wav files
-echo [7] Install CUDA runtime dependencies
+echo [7] Install or repair Python dependencies
 echo [8] Download Whisper models
 echo [0] Exit
 echo.
@@ -97,9 +97,9 @@ goto menu
 
 :install_cuda
 cls
-echo Installing CUDA runtime dependencies. This can take a long time.
+echo Installing Python dependencies. This can take a long time.
 echo.
-python -m pip install -r requirements-cuda.txt
+python -m pip install -r requirements.txt
 pause
 goto menu
 

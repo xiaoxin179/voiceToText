@@ -163,23 +163,13 @@ conda activate voice-to-text
 python -m pip install --upgrade pip
 ```
 
-安装基础依赖：
+安装全部 pip 依赖：
 
 ```powershell
-pip install pyaudiowpatch faster-whisper numpy==1.26.4 soundfile
+pip install -r requirements.txt
 ```
 
-如果运行 GPU 转写时报 `cublas64_12.dll` 或 cuDNN 相关 DLL 缺失，安装 CUDA 运行库依赖：
-
-```powershell
-pip install -r requirements-cuda.txt
-```
-
-当前命令行 MVP 不依赖 UI。如果后续要做桌面界面，再安装：
-
-```powershell
-pip install -r requirements-ui.txt
-```
+`requirements.txt` 已包含桌面界面、音频采集、faster-whisper、NumPy 兼容版本，以及 GPU 推理需要的 NVIDIA CUDA/cuDNN Python 运行库。
 
 ## 当前代码入口
 

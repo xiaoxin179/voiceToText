@@ -203,8 +203,55 @@ start_voice_to_text.bat
 - 环境和设备检查
 - 音频设备列表
 - 5 秒录音测试
-- CUDA 运行库依赖安装
+- Python 依赖安装和修复
 - Whisper 模型下载
+
+## 无 NVIDIA 显卡 / CPU 启动方式
+
+没有 NVIDIA 显卡的电脑也可以启动本项目，只是不能使用 `cuda` 推理，需要切换到 CPU 模式。
+
+首次准备环境：
+
+```powershell
+conda env create -f environment.yml
+conda activate voice-to-text
+python init_models.py --models tiny
+```
+
+如果只下载 `tiny` 模型，需要让启动检查只要求 `tiny`，否则默认会同时检查 `tiny, medium`：
+
+```powershell
+$env:VTT_REQUIRED_MODELS="tiny"
+python app.py
+```
+
+GUI 打开后建议这样设置：
+
+```text
+模型: tiny
+设备: cpu
+精度: int8
+语言: zh
+文本: 简体中文
+切片: 2 s 或 3 s
+```
+
+也可以使用菜单启动器：
+
+```text
+start_voice_to_text.bat
+```
+
+然后选择 `Start listening - CPU fallback`。这个模式会用：
+
+```text
+model=tiny
+device=cpu
+compute-type=int8
+source=both
+```
+
+CPU 模式的实时性取决于处理器性能。如果出现延迟，优先使用 `tiny` 模型，或者把切片长度调到 `3 s`。
 
 ## 模型初始化
 

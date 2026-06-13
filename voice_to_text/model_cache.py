@@ -75,6 +75,6 @@ def required_models_error_message(models: list[str] | None = None) -> str:
         "请先运行:",
         f"python init_models.py --models {' '.join(missing)}",
         "",
-        "或双击项目根目录的 init_models.bat。",
+        r"或双击项目 scripts 目录中的 init_models.bat。",
     ]
     return "\n".join(lines)

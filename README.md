@@ -177,22 +177,22 @@ pip install -r requirements.txt
 
 当前已经实现命令行 MVP，入口文件是 `main.py`。
 
-不想输入命令时，可以直接双击项目根目录的启动文件：
+不想输入命令时，可以直接双击 `scripts` 目录中的启动文件：
 
 ```text
-start_gui.bat
+scripts\start_gui.bat
 ```
 
 首次使用前建议先双击模型初始化文件，提前下载模型：
 
 ```text
-init_models.bat
+scripts\init_models.bat
 ```
 
 也可以双击带菜单的启动文件：
 
 ```text
-start_voice_to_text.bat
+scripts\start_voice_to_text.bat
 ```
 
 启动菜单包含：
@@ -239,7 +239,7 @@ GUI 打开后建议这样设置：
 也可以使用菜单启动器：
 
 ```text
-start_voice_to_text.bat
+scripts\start_voice_to_text.bat
 ```
 
 然后选择 `Start listening - CPU fallback`。这个模式会用：

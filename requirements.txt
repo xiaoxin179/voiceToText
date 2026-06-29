@@ -1,5 +1,7 @@
 faster-whisper
 pyaudiowpatch
+yt-dlp
+requests
 numpy==1.26.4
 soundfile
 PyQt6

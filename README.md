@@ -393,3 +393,43 @@ python main.py listen --source both --model small --device cuda --compute-type i
 - 增加导出 Markdown / TXT / SRT。
 - 如果后续需要真正低延迟流式识别，可以评估 `sherpa-onnx`。
 - 如果后续需要正式 Windows 桌面软件安装包，可以再迁移到 C# + WPF / WinUI 3，或继续用 Python + PyInstaller 打包。
+
+## 平台视频转写
+
+桌面 GUI 现在包含两个侧边栏栏目：
+
+- `语音转写`：保留原来的麦克风和系统音频实时监听逻辑。
+- `平台视频转写`：粘贴 Bilibili、YouTube、Douyin 等 `yt-dlp` 支持的视频链接，下载音频后用本地 `faster-whisper` 转成文字稿。
+
+示例链接：
+
+```text
+https://www.bilibili.com/video/BV1rv7A6oEeP/
+```
+
+该示例是 120 P 的 Bilibili 长合集。当前 Bilibili fallback 会处理第 1 P，后续可以继续扩展为指定分 P 转写。
+
+新增依赖：
+
+```powershell
+pip install yt-dlp requests
+```
+
+系统还需要能从命令行访问 `ffmpeg`。本地转写不需要额外 API 费用，仍然使用 HuggingFace 缓存中的 `Systran/faster-whisper-*` 模型。
+
+如果视频需要登录态，在 `Cookie` 下拉框中选择已经登录的平台浏览器，例如 `Chrome` 或 `Edge`。
+
+如果需要调用 Agent 优化识别结果，勾选 `使用 DeepSeek 优化识别文字`。DeepSeek 只处理已经识别出的文本，不负责音频转写。API Key 可以直接填在界面中，也可以设置环境变量：
+
+```powershell
+$env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
+```
+
+如果界面里没有填写 Key，程序会优先读取 `DASHSCOPE_API_KEY`，然后读取 `DEEPSEEK_API_KEY`。该变量需要对应目标 DeepSeek 兼容接口可用的 Key。
+
+输出文件默认保存到 `transcripts/video-YYYYMMDD-HHMMSS/`，包括：
+
+- `audio.mp3`
+- `transcript_raw.md`
+- `transcript_timestamped.md`
+- `transcript_deepseek.md`，仅在启用 DeepSeek 优化时生成。

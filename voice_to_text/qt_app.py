@@ -5,6 +5,7 @@ import threading
 import time
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPalette, QPixmap
@@ -17,6 +18,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -24,6 +26,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QSpinBox,
+    QStackedWidget,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -39,6 +42,11 @@ from .audio_devices import (
     list_loopback_devices,
 )
 from .model_cache import required_models_error_message
+from .video_transcription import (
+    VideoTranscriptionOptions,
+    VideoTranscriptionResult,
+    transcribe_platform_video,
+)
 
 
 @dataclass
@@ -52,6 +60,15 @@ class RuntimeState:
     last_loading_notice_at: float = 0.0
 
 
+@dataclass
+class VideoRuntimeState:
+    progress_queue: queue.Queue[str]
+    result_queue: queue.Queue[VideoTranscriptionResult | Exception]
+    thread: threading.Thread
+    started_at: float
+    cancel_requested: bool = False
+
+
 class VoiceToTextWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -63,6 +80,7 @@ class VoiceToTextWindow(QMainWindow):
         self.mic_devices: list[AudioDevice] = []
         self.system_devices: list[AudioDevice] = []
         self.runtime: RuntimeState | None = None
+        self.video_runtime: VideoRuntimeState | None = None
         self.started_at = 0.0
 
         self._build_ui()
@@ -124,9 +142,43 @@ class VoiceToTextWindow(QMainWindow):
         header_layout.addWidget(self.refresh_button)
         root_layout.addWidget(header)
 
-        body_layout = QHBoxLayout()
+        app_body_layout = QHBoxLayout()
+        app_body_layout.setSpacing(16)
+        root_layout.addLayout(app_body_layout, stretch=1)
+
+        nav = QFrame()
+        nav.setObjectName("navPanel")
+        nav.setFixedWidth(180)
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(12, 12, 12, 12)
+        nav_layout.setSpacing(10)
+        self.voice_nav_button = QPushButton("语音转写")
+        self.video_nav_button = QPushButton("平台视频转写")
+        for button in (self.voice_nav_button, self.video_nav_button):
+            button.setObjectName("navButton")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setCheckable(True)
+        self.voice_nav_button.setChecked(True)
+        nav_layout.addWidget(self.voice_nav_button)
+        nav_layout.addWidget(self.video_nav_button)
+        nav_layout.addStretch()
+        app_body_layout.addWidget(nav)
+
+        self.pages = QStackedWidget()
+        app_body_layout.addWidget(self.pages, stretch=1)
+        self.pages.addWidget(self._build_voice_page())
+        self.pages.addWidget(self._build_video_page())
+
+        self.status = QStatusBar(self)
+        self.status.setObjectName("bottomStatus")
+        self.setStatusBar(self.status)
+        self._set_status("就绪", "idle")
+
+    def _build_voice_page(self) -> QWidget:
+        page = QWidget()
+        body_layout = QHBoxLayout(page)
+        body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(16)
-        root_layout.addLayout(body_layout, stretch=1)
 
         sidebar = QFrame()
         sidebar.setObjectName("sidePanel")
@@ -242,10 +294,119 @@ class VoiceToTextWindow(QMainWindow):
         workspace.addWidget(self._text_panel("调试日志", "采集电平、队列和异常会显示在这里", self.debug_text, "debugPanel"))
         workspace.setSizes([420, 230, 150])
 
-        self.status = QStatusBar(self)
-        self.status.setObjectName("bottomStatus")
-        self.setStatusBar(self.status)
-        self._set_status("就绪", "idle")
+        return page
+
+    def _build_video_page(self) -> QWidget:
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("videoSidePanel")
+        sidebar.setFixedWidth(390)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(18, 18, 18, 18)
+        sidebar_layout.setSpacing(16)
+        layout.addWidget(sidebar)
+
+        self.video_url_input = QLineEdit()
+        self.video_url_input.setPlaceholderText("粘贴 Bilibili / YouTube / Douyin 等视频链接")
+        self.video_url_input.setMinimumHeight(36)
+
+        self.video_model_combo = QComboBox()
+        self.video_model_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
+        self.video_model_combo.setCurrentText("tiny")
+
+        self.video_device_combo = QComboBox()
+        self.video_device_combo.addItems(["cuda", "cpu"])
+        self.video_device_combo.setCurrentText("cpu")
+
+        self.video_compute_combo = QComboBox()
+        self.video_compute_combo.addItems(["float16", "int8_float16", "int8", "float32"])
+        self.video_compute_combo.setCurrentText("int8")
+
+        self.video_language_combo = QComboBox()
+        self.video_language_combo.addItems(["zh", "en", "auto"])
+
+        self.video_text_mode_combo = QComboBox()
+        self.video_text_mode_combo.addItem("简体中文", userData="simplified")
+        self.video_text_mode_combo.addItem("原始输出", userData="original")
+        self.video_text_mode_combo.addItem("繁体中文", userData="traditional")
+
+        self.video_cookie_combo = QComboBox()
+        self.video_cookie_combo.addItem("不使用浏览器 Cookie", userData="")
+        self.video_cookie_combo.addItem("Chrome", userData="chrome")
+        self.video_cookie_combo.addItem("Edge", userData="edge")
+        self.video_cookie_combo.addItem("Firefox", userData="firefox")
+
+        self.video_optimize_check = QCheckBox("使用 DeepSeek 优化识别文字")
+        self.video_deepseek_key_input = QLineEdit()
+        self.video_deepseek_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.video_deepseek_key_input.setPlaceholderText("可留空，默认读取 DASHSCOPE_API_KEY / DEEPSEEK_API_KEY")
+
+        self.video_deepseek_model_combo = QComboBox()
+        self.video_deepseek_model_combo.addItems(
+            ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]
+        )
+
+        self.video_start_button = QPushButton("开始转写")
+        self.video_start_button.setObjectName("primaryButton")
+        self.video_stop_button = QPushButton("停止")
+        self.video_stop_button.setObjectName("dangerButton")
+        self.video_stop_button.setEnabled(False)
+        self.video_clear_button = QPushButton("清空结果")
+        for button in (self.video_start_button, self.video_stop_button, self.video_clear_button):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        sidebar_layout.addWidget(self._section_title("平台视频", "输入视频链接并下载音频后本地转写"))
+        source_form = self._make_form()
+        source_form.addRow("链接", self.video_url_input)
+        source_form.addRow("Cookie", self.video_cookie_combo)
+        sidebar_layout.addLayout(source_form)
+
+        sidebar_layout.addWidget(self._divider())
+        sidebar_layout.addWidget(self._section_title("识别参数", "复用本地 faster-whisper 模型"))
+        video_asr_form = self._make_form()
+        video_asr_form.addRow("模型", self.video_model_combo)
+        video_asr_form.addRow("设备", self.video_device_combo)
+        video_asr_form.addRow("精度", self.video_compute_combo)
+        video_asr_form.addRow("语言", self.video_language_combo)
+        video_asr_form.addRow("文本", self.video_text_mode_combo)
+        sidebar_layout.addLayout(video_asr_form)
+
+        sidebar_layout.addWidget(self._divider())
+        sidebar_layout.addWidget(self._section_title("Agent 优化", "DeepSeek 只处理文字稿，不做音频识别"))
+        deepseek_form = self._make_form()
+        deepseek_form.addRow("启用", self.video_optimize_check)
+        deepseek_form.addRow("Key", self.video_deepseek_key_input)
+        deepseek_form.addRow("模型", self.video_deepseek_model_combo)
+        sidebar_layout.addLayout(deepseek_form)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        button_row.addWidget(self.video_start_button)
+        button_row.addWidget(self.video_stop_button)
+        button_row.addWidget(self.video_clear_button)
+        sidebar_layout.addLayout(button_row)
+        sidebar_layout.addStretch()
+
+        workspace = QSplitter(Qt.Orientation.Vertical)
+        workspace.setObjectName("videoWorkspace")
+        layout.addWidget(workspace, stretch=1)
+
+        self.video_raw_text = self._make_text_box()
+        self.video_optimized_text = self._make_text_box()
+        self.video_log_text = self._make_text_box()
+        self.video_raw_text.setPlaceholderText("这里显示平台视频本地 Whisper 原始文字稿")
+        self.video_optimized_text.setPlaceholderText("这里显示 DeepSeek 优化后的文字稿")
+        self.video_log_text.setPlaceholderText("这里显示下载、识别和 Agent 优化进度")
+
+        workspace.addWidget(self._text_panel("原始文字稿", "LOCAL WHISPER", self.video_raw_text, "videoRawPanel"))
+        workspace.addWidget(self._text_panel("优化文字稿", "DEEPSEEK", self.video_optimized_text, "videoOptimizedPanel"))
+        workspace.addWidget(self._text_panel("处理日志", "DOWNLOAD / ASR / AGENT", self.video_log_text, "videoLogPanel"))
+        workspace.setSizes([360, 300, 170])
+        return page
 
     def _wrap_layout(self, layout: QHBoxLayout) -> QWidget:
         widget = QWidget()
@@ -337,8 +498,9 @@ class VoiceToTextWindow(QMainWindow):
                 color: #17212b;
                 font-family: "Microsoft YaHei UI";
             }
-            QFrame#headerPanel, QFrame#sidePanel, QFrame#micPanel, QFrame#systemPanel,
-            QFrame#timelinePanel, QFrame#debugPanel {
+            QFrame#headerPanel, QFrame#navPanel, QFrame#sidePanel, QFrame#videoSidePanel,
+            QFrame#micPanel, QFrame#systemPanel, QFrame#timelinePanel, QFrame#debugPanel,
+            QFrame#videoRawPanel, QFrame#videoOptimizedPanel, QFrame#videoLogPanel {
                 background: #ffffff;
                 border: 1px solid #d9e1ea;
                 border-radius: 8px;
@@ -375,17 +537,17 @@ class VoiceToTextWindow(QMainWindow):
                 selection-background-color: #15616d;
                 selection-color: #ffffff;
             }
-            QComboBox, QSpinBox, QDoubleSpinBox {
+            QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
                 min-height: 34px;
                 border: 1px solid #c8d3df;
                 border-radius: 6px;
                 padding: 4px 10px;
                 background: #ffffff;
             }
-            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QPlainTextEdit:hover {
+            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QLineEdit:hover, QPlainTextEdit:hover {
                 border-color: #9db3c7;
             }
-            QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {
+            QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus, QPlainTextEdit:focus {
                 border-color: #15616d;
             }
             QCheckBox {
@@ -440,6 +602,18 @@ class VoiceToTextWindow(QMainWindow):
                 background: #edf1f5;
                 border-color: #d8e0e8;
             }
+            QPushButton#navButton {
+                min-height: 42px;
+                text-align: left;
+                padding-left: 14px;
+                border-radius: 6px;
+                font-weight: 700;
+            }
+            QPushButton#navButton:checked {
+                color: #ffffff;
+                background: #15616d;
+                border-color: #15616d;
+            }
             QFrame#divider {
                 color: #d9e1ea;
                 background: #d9e1ea;
@@ -474,6 +648,7 @@ class VoiceToTextWindow(QMainWindow):
             "running": "监听中",
             "stopped": "已停止",
             "error": "异常",
+            "working": "处理中",
         }
         colors = {
             "idle": ("#eff6ff", "#1d4f7a", "#c9dff5"),
@@ -481,6 +656,7 @@ class VoiceToTextWindow(QMainWindow):
             "running": ("#eaf7f4", "#0f5f57", "#a7d7cf"),
             "stopped": ("#f1f5f9", "#475569", "#d4dde7"),
             "error": ("#fff0f0", "#8a1f1f", "#efb5b5"),
+            "working": ("#eef8f7", "#0f5f57", "#acd9d4"),
         }
         background, foreground, border = colors.get(tone, colors["idle"])
         self.status_badge.setText(labels.get(tone, "就绪"))
@@ -506,14 +682,32 @@ class VoiceToTextWindow(QMainWindow):
         self._set_metric(self.threads_value, threads)
 
     def _connect_events(self) -> None:
+        self.voice_nav_button.clicked.connect(lambda: self.switch_page(0))
+        self.video_nav_button.clicked.connect(lambda: self.switch_page(1))
         self.start_button.clicked.connect(self.start_listening)
         self.stop_button.clicked.connect(self.stop_listening)
         self.clear_button.clicked.connect(self.clear_transcripts)
         self.refresh_button.clicked.connect(self.refresh_devices)
         self.device_combo.currentTextChanged.connect(self._sync_compute_default)
+        self.video_device_combo.currentTextChanged.connect(self._sync_video_compute_default)
+        self.video_start_button.clicked.connect(self.start_video_transcription)
+        self.video_stop_button.clicked.connect(self.stop_video_transcription)
+        self.video_clear_button.clicked.connect(self.clear_video_transcripts)
+
+    def switch_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        self.voice_nav_button.setChecked(index == 0)
+        self.video_nav_button.setChecked(index == 1)
+        if index == 0:
+            self._set_status("语音转写", "idle" if not self.runtime else "running")
+        else:
+            self._set_status("平台视频转写", "idle" if not self.video_runtime else "working")
 
     def _sync_compute_default(self, device: str) -> None:
         self.compute_combo.setCurrentText("int8" if device == "cpu" else "float16")
+
+    def _sync_video_compute_default(self, device: str) -> None:
+        self.video_compute_combo.setCurrentText("int8" if device == "cpu" else "float16")
 
     def refresh_devices(self) -> None:
         try:
@@ -654,8 +848,91 @@ class VoiceToTextWindow(QMainWindow):
         self.debug_text.clear()
         self._set_status("文本已清空", "idle")
 
+    def start_video_transcription(self) -> None:
+        if self.video_runtime:
+            return
+
+        url = self.video_url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "缺少视频链接", "请先粘贴 Bilibili 或其他平台的视频链接。")
+            return
+
+        language = self.video_language_combo.currentText()
+        language_value = None if language == "auto" else language
+        options = VideoTranscriptionOptions(
+            url=url,
+            model_size=self.video_model_combo.currentText(),
+            device=self.video_device_combo.currentText(),
+            compute_type=self.video_compute_combo.currentText(),
+            language=language_value,
+            text_mode=self.video_text_mode_combo.currentData(),
+            output_dir=Path("transcripts"),
+            cookie_browser=self.video_cookie_combo.currentData(),
+            optimize_with_deepseek=self.video_optimize_check.isChecked(),
+            deepseek_api_key=self.video_deepseek_key_input.text().strip(),
+            deepseek_model=self.video_deepseek_model_combo.currentText(),
+        )
+
+        progress_queue: queue.Queue[str] = queue.Queue()
+        result_queue: queue.Queue[VideoTranscriptionResult | Exception] = queue.Queue()
+
+        def worker() -> None:
+            try:
+                result = transcribe_platform_video(options, progress=progress_queue.put)
+            except Exception as exc:
+                result_queue.put(exc)
+            else:
+                result_queue.put(result)
+
+        thread = threading.Thread(target=worker, name="video-transcription-worker", daemon=True)
+        self.video_runtime = VideoRuntimeState(progress_queue, result_queue, thread, time.time())
+        self.video_raw_text.clear()
+        self.video_optimized_text.clear()
+        self.video_log_text.clear()
+        self.append_video_log(f"开始平台视频转写: {url}")
+        self.append_video_log(
+            f"model={options.model_size}, device={options.device}, compute={options.compute_type}, "
+            f"language={options.language or 'auto'}, deepseek={options.optimize_with_deepseek}"
+        )
+        self._set_video_running_ui(True)
+        self._set_status("平台视频转写处理中", "working")
+        thread.start()
+
+    def stop_video_transcription(self) -> None:
+        runtime = self.video_runtime
+        if not runtime:
+            return
+        runtime.cancel_requested = True
+        self.video_stop_button.setEnabled(False)
+        self.append_video_log("已请求停止。后台任务会在当前下载或识别步骤结束后退出显示。")
+        self._set_status("正在停止平台视频转写", "stopped")
+
+    def clear_video_transcripts(self) -> None:
+        self.video_raw_text.clear()
+        self.video_optimized_text.clear()
+        self.video_log_text.clear()
+        self._set_status("平台视频结果已清空", "idle")
+
+    def _set_video_running_ui(self, running: bool) -> None:
+        self.video_start_button.setEnabled(not running)
+        self.video_stop_button.setEnabled(running)
+        for widget in (
+            self.video_url_input,
+            self.video_model_combo,
+            self.video_device_combo,
+            self.video_compute_combo,
+            self.video_language_combo,
+            self.video_text_mode_combo,
+            self.video_cookie_combo,
+            self.video_optimize_check,
+            self.video_deepseek_key_input,
+            self.video_deepseek_model_combo,
+        ):
+            widget.setEnabled(not running)
+
     def poll_runtime(self) -> None:
         runtime = self.runtime
+        self.poll_video_runtime()
         if not runtime:
             return
 
@@ -703,6 +980,52 @@ class VoiceToTextWindow(QMainWindow):
         self._update_metrics(elapsed, runtime.audio_queue.qsize(), alive)
         self._set_status(f"监听中... {elapsed}s | 待识别音频块: {runtime.audio_queue.qsize()} | 采集线程: {alive}", "running")
 
+    def poll_video_runtime(self) -> None:
+        runtime = self.video_runtime
+        if not runtime:
+            return
+
+        while True:
+            try:
+                message = runtime.progress_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.append_video_log(message)
+
+        try:
+            result = runtime.result_queue.get_nowait()
+        except queue.Empty:
+            elapsed = int(time.time() - runtime.started_at)
+            if self.pages.currentIndex() == 1:
+                if runtime.cancel_requested:
+                    self._set_status(f"平台视频转写正在停止... {elapsed}s", "stopped")
+                else:
+                    self._set_status(f"平台视频转写处理中... {elapsed}s", "working")
+            return
+
+        self.video_runtime = None
+        self._set_video_running_ui(False)
+        if runtime.cancel_requested:
+            self.append_video_log("后台任务已结束，本次结果已丢弃。")
+            self._set_status("平台视频转写已停止", "stopped")
+            return
+
+        if isinstance(result, Exception):
+            self.append_video_log(f"处理失败: {result}")
+            self._set_status("平台视频转写失败", "error")
+            QMessageBox.critical(self, "平台视频转写失败", str(result))
+            return
+
+        self.video_raw_text.setPlainText(result.raw_text)
+        if result.optimized_text:
+            self.video_optimized_text.setPlainText(result.optimized_text)
+        self.append_video_log(f"音频文件: {result.audio_path}")
+        self.append_video_log(f"原始文字稿: {result.raw_transcript_path}")
+        self.append_video_log(f"时间戳文字稿: {result.timestamped_transcript_path}")
+        if result.optimized_transcript_path:
+            self.append_video_log(f"优化文字稿: {result.optimized_transcript_path}")
+        self._set_status("平台视频转写完成", "idle")
+
     def _drain_debug(self, runtime: RuntimeState) -> None:
         processed = 0
         while processed < 80:
@@ -728,8 +1051,12 @@ class VoiceToTextWindow(QMainWindow):
     def append_debug(self, line: str) -> None:
         self.debug_text.appendPlainText(line)
 
+    def append_video_log(self, line: str) -> None:
+        self.video_log_text.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {line}")
+
     def closeEvent(self, event) -> None:
         self.stop_listening()
+        self.stop_video_transcription()
         event.accept()
 
 

@@ -8,6 +8,8 @@ dependencies:
   - pip:
       - faster-whisper
       - pyaudiowpatch
+      - yt-dlp
+      - requests
       - soundfile
       - PyQt6
       - nvidia-cublas-cu12

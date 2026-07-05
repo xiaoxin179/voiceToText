@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import queue
 import sys
 import time
@@ -18,6 +19,12 @@ from .audio_devices import (
     list_loopback_devices,
 )
 from .text_converter import TextConverter
+from .service_core import (
+    SpeakerServiceRequest,
+    VideoServiceRequest,
+    transcribe_speaker,
+    transcribe_video_url,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +47,39 @@ def build_parser() -> argparse.ArgumentParser:
     transcribe.add_argument("--language", default="zh")
     transcribe.add_argument("--text-mode", choices=["simplified", "traditional", "original"], default="simplified")
     transcribe.add_argument("--vad-filter", action=argparse.BooleanOptionalAction, default=True)
+
+    video = subparsers.add_parser("transcribe-video", help="Download/transcribe a platform video URL")
+    video.add_argument("url")
+    video.add_argument("--model", default="tiny")
+    video.add_argument("--device", default="cpu")
+    video.add_argument("--compute-type", default="int8")
+    video.add_argument("--language", default="zh")
+    video.add_argument("--text-mode", choices=["simplified", "traditional", "original"], default="simplified")
+    video.add_argument("--output-dir", type=Path, default=Path("transcripts"))
+    video.add_argument("--cookie-browser", choices=["", "chrome", "edge", "firefox"], default="")
+    video.add_argument("--optimize-with-deepseek", action="store_true")
+    video.add_argument("--deepseek-api-key", default="")
+    video.add_argument("--deepseek-model", default="deepseek-v4-flash")
+    video.add_argument("--json", action="store_true", help="Print machine-readable JSON to stdout")
+
+    speaker = subparsers.add_parser("transcribe-speaker", help="Record system speaker/mic audio and transcribe it")
+    speaker.add_argument("--seconds", type=float, default=60.0)
+    speaker.add_argument("--source", choices=["system", "mic"], default="system")
+    speaker.add_argument("--model", default="tiny")
+    speaker.add_argument("--device", default="cpu")
+    speaker.add_argument("--compute-type", default="int8")
+    speaker.add_argument("--language", default="zh")
+    speaker.add_argument("--text-mode", choices=["simplified", "traditional", "original"], default="simplified")
+    speaker.add_argument("--output-dir", type=Path, default=Path("transcripts"))
+    speaker.add_argument("--chunk-seconds", type=float, default=2.0)
+    speaker.add_argument("--min-rms", type=float, default=0.006)
+    speaker.add_argument("--vad-filter", action=argparse.BooleanOptionalAction, default=True)
+    speaker.add_argument("--silence-stop-seconds", type=float, default=0.0)
+    speaker.add_argument("--json", action="store_true", help="Print machine-readable JSON to stdout")
+
+    serve = subparsers.add_parser("serve", help="Start the local HTTP service")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
 
     listen = subparsers.add_parser("listen", help="Capture audio and transcribe with faster-whisper")
     listen.add_argument("--source", choices=["mic", "system", "both"], default="both")
@@ -154,6 +194,67 @@ def cmd_transcribe_file(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_transcribe_video(args: argparse.Namespace) -> int:
+    request = VideoServiceRequest(
+        url=args.url,
+        model_size=args.model,
+        device=args.device,
+        compute_type=args.compute_type,
+        language=None if args.language == "auto" else args.language,
+        text_mode=args.text_mode,
+        output_dir=args.output_dir,
+        cookie_browser=args.cookie_browser,
+        optimize_with_deepseek=args.optimize_with_deepseek,
+        deepseek_api_key=args.deepseek_api_key,
+        deepseek_model=args.deepseek_model,
+    )
+    result = transcribe_video_url(request, progress=_cli_progress(args.json))
+    _print_service_result(result.to_dict(), args.json)
+    return 0
+
+
+def cmd_transcribe_speaker(args: argparse.Namespace) -> int:
+    request = SpeakerServiceRequest(
+        seconds=args.seconds,
+        source=args.source,
+        model_size=args.model,
+        device=args.device,
+        compute_type=args.compute_type,
+        language=None if args.language == "auto" else args.language,
+        text_mode=args.text_mode,
+        output_dir=args.output_dir,
+        chunk_seconds=args.chunk_seconds,
+        min_rms=args.min_rms,
+        vad_filter=args.vad_filter,
+        silence_stop_seconds=args.silence_stop_seconds,
+    )
+    result = transcribe_speaker(request, progress=_cli_progress(args.json))
+    _print_service_result(result.to_dict(), args.json)
+    return 0
+
+
+def _cli_progress(json_mode: bool):
+    stream = sys.stderr if json_mode else sys.stdout
+
+    def progress(message: str) -> None:
+        print(message, file=stream, flush=True)
+
+    return progress
+
+
+def _print_service_result(data: dict, json_mode: bool) -> None:
+    if json_mode:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
+
+    print()
+    print(f"Output dir: {data['output_dir']}")
+    print(f"Raw transcript: {data['raw_transcript_path']}")
+    print(f"Timestamped transcript: {data['timestamped_transcript_path']}")
+    if data.get("audio_path"):
+        print(f"Audio: {data['audio_path']}")
+
+
 def _start_capture_threads(args: argparse.Namespace, audio_queue: queue.Queue[AudioChunk]) -> list[AudioCapture]:
     threads: list[AudioCapture] = []
     if args.source in ("mic", "both"):
@@ -236,6 +337,15 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_record_test(args)
         if args.command == "transcribe-file":
             return cmd_transcribe_file(args)
+        if args.command == "transcribe-video":
+            return cmd_transcribe_video(args)
+        if args.command == "transcribe-speaker":
+            return cmd_transcribe_speaker(args)
+        if args.command == "serve":
+            from .api_server import run_server
+
+            run_server(args.host, args.port)
+            return 0
         if args.command == "listen":
             return cmd_listen(args)
     except RuntimeError as exc:

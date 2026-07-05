@@ -418,6 +418,9 @@ pip install yt-dlp requests
 系统还需要能从命令行访问 `ffmpeg`。本地转写不需要额外 API 费用，仍然使用 HuggingFace 缓存中的 `Systran/faster-whisper-*` 模型。
 
 如果视频需要登录态，在 `Cookie` 下拉框中选择已经登录的平台浏览器，例如 `Chrome` 或 `Edge`。
+抖音的用户页/弹窗链接会自动规范化为 `/video/<id>` 视频页；抖音通常仍需要新鲜浏览器 Cookie。若提示无法复制浏览器 Cookie 数据库，请关闭对应浏览器窗口后重试，或切换到另一个已登录浏览器。
+如果关闭 Chrome/Edge 后又提示 `Failed to decrypt with DPAPI`，通常是新版 Chromium 浏览器在 Windows 上启用了 v20/App-Bound Cookie 加密；关闭浏览器只能解除文件锁，不能让 `yt-dlp` 解密这些 Cookie。此时建议改用 Firefox Cookie、浏览器扩展导出的 Netscape `cookies.txt`，或复制真实媒体流链接。
+如果 Chrome 已经能播放抖音视频，也可以在 Chrome 开发者工具 Network 中复制 `douyinvod` / `media-audio` 音频流链接，直接粘贴到平台视频输入框转写。
 
 如果需要调用 Agent 优化识别结果，勾选 `使用 DeepSeek 优化识别文字`。DeepSeek 只处理已经识别出的文本，不负责音频转写。API Key 可以直接填在界面中，也可以设置环境变量：
 
@@ -433,3 +436,85 @@ $env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 - `transcript_raw.md`
 - `transcript_timestamped.md`
 - `transcript_deepseek.md`，仅在启用 DeepSeek 优化时生成。
+
+## 服务化调用
+
+项目现在提供 GUI 之外的本地服务化入口，方便 AI 通过 CLI 或 HTTP 调用。
+
+### CLI：视频链接转写
+
+```powershell
+python main.py transcribe-video "https://www.bilibili.com/video/BV..." --model tiny --device cpu --compute-type int8 --json
+```
+
+返回 JSON，包含 `raw_text`、`timestamped_text`、`audio_path`、`raw_transcript_path`、`timestamped_transcript_path` 和输出目录。
+
+### CLI：监听扬声器音频
+
+适合抖音、登录态网页、外站视频等无法直接下载音频的场景。先让浏览器播放视频，再调用：
+
+```powershell
+python main.py transcribe-speaker --seconds 120 --source system --model tiny --device cpu --compute-type int8 --json
+```
+
+输出默认保存到 `transcripts/speaker-YYYYMMDD-HHMMSS/`，包括：
+
+- `speaker.wav`
+- `transcript_raw.md`
+- `transcript_timestamped.md`
+
+注意：系统扬声器监听会录到当前电脑正在播放的所有声音。转写期间请避免其他视频、提示音或 TTS 混入。
+
+### HTTP 服务
+
+启动本地服务：
+
+```powershell
+python main.py serve --host 127.0.0.1 --port 8765
+```
+
+健康检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health
+```
+
+同步转写视频链接：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/transcribe/video -Method Post -ContentType "application/json" -Body '{
+  "url": "https://www.bilibili.com/video/BV...",
+  "model": "tiny",
+  "device": "cpu",
+  "compute_type": "int8",
+  "language": "zh"
+}'
+```
+
+创建扬声器监听任务：
+
+```powershell
+$session = Invoke-RestMethod http://127.0.0.1:8765/sessions/speaker -Method Post -ContentType "application/json" -Body '{
+  "seconds": 120,
+  "source": "system",
+  "model": "tiny",
+  "device": "cpu",
+  "compute_type": "int8",
+  "language": "zh"
+}'
+
+Invoke-RestMethod "http://127.0.0.1:8765/sessions/$($session.session_id)?result=1"
+```
+
+提前停止任务：
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8765/sessions/$($session.session_id)/stop" -Method Post
+```
+
+AI 自动化建议：
+
+1. 调 `/sessions/speaker` 开始监听。
+2. 控制浏览器打开并播放目标视频。
+3. 轮询 `/sessions/{session_id}?result=1`。
+4. 根据 `status=completed` 后读取 `result.raw_text` 或 `result.timestamped_text`。

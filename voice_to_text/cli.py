@@ -20,8 +20,10 @@ from .audio_devices import (
 )
 from .text_converter import TextConverter
 from .service_core import (
+    MediaDownloadServiceRequest,
     SpeakerServiceRequest,
     VideoServiceRequest,
+    download_video_url,
     transcribe_speaker,
     transcribe_video_url,
 )
@@ -61,6 +63,16 @@ def build_parser() -> argparse.ArgumentParser:
     video.add_argument("--deepseek-api-key", default="")
     video.add_argument("--deepseek-model", default="deepseek-v4-flash")
     video.add_argument("--json", action="store_true", help="Print machine-readable JSON to stdout")
+
+    download = subparsers.add_parser("download-video", help="Download a platform video URL without transcription")
+    download.add_argument("url")
+    download.add_argument("--output-dir", type=Path, default=Path("downloads"))
+    download.add_argument("--cookie-browser", choices=["", "chrome", "edge", "firefox"], default="")
+    download.add_argument("--cookies-file", type=Path)
+    download.add_argument("--referer", default="")
+    download.add_argument("--header", action="append", default=[], help="Extra request header, for example: Authorization: Bearer ...")
+    download.add_argument("--format", default="bv*+ba/b", dest="format_selector")
+    download.add_argument("--json", action="store_true", help="Print machine-readable JSON to stdout")
 
     speaker = subparsers.add_parser("transcribe-speaker", help="Record system speaker/mic audio and transcribe it")
     speaker.add_argument("--seconds", type=float, default=60.0)
@@ -213,6 +225,28 @@ def cmd_transcribe_video(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_download_video(args: argparse.Namespace) -> int:
+    request = MediaDownloadServiceRequest(
+        url=args.url,
+        output_dir=args.output_dir,
+        cookie_browser=args.cookie_browser,
+        cookies_file=args.cookies_file,
+        referer=args.referer,
+        headers=tuple(args.header),
+        format_selector=args.format_selector,
+    )
+    result = download_video_url(request, progress=_cli_progress(args.json))
+    data = result.to_dict()
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    else:
+        print()
+        print(f"Downloaded media: {data['media_path']}")
+        if data["title"]:
+            print(f"Title: {data['title']}")
+    return 0
+
+
 def cmd_transcribe_speaker(args: argparse.Namespace) -> int:
     request = SpeakerServiceRequest(
         seconds=args.seconds,
@@ -339,6 +373,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_transcribe_file(args)
         if args.command == "transcribe-video":
             return cmd_transcribe_video(args)
+        if args.command == "download-video":
+            return cmd_download_video(args)
         if args.command == "transcribe-speaker":
             return cmd_transcribe_speaker(args)
         if args.command == "serve":

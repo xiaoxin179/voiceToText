@@ -13,9 +13,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .service_core import (
+    MediaDownloadServiceRequest,
     ServiceTranscriptionResult,
     SpeakerServiceRequest,
     VideoServiceRequest,
+    download_video_url,
     transcribe_speaker,
     transcribe_video_url,
 )
@@ -108,6 +110,16 @@ class VoiceToTextHandler(BaseHTTPRequestHandler):
                 result = transcribe_video_url(VideoServiceRequest.from_mapping(data))
                 self._send_json({"ok": True, "result": result.to_dict()})
                 return
+            if parsed.path == "/download/video":
+                result = download_video_url(MediaDownloadServiceRequest.from_mapping(data))
+                self._send_json({"ok": True, "result": result.to_dict()})
+                return
+            if parsed.path == "/sessions/download":
+                session = STORE.create("download")
+                request = MediaDownloadServiceRequest.from_mapping(data)
+                _start_session(session, lambda emit: download_video_url(request, progress=emit))
+                self._send_json(session.to_dict(), status=HTTPStatus.ACCEPTED)
+                return
             if parsed.path == "/sessions/video":
                 session = STORE.create("video")
                 request = VideoServiceRequest.from_mapping(data)
@@ -172,7 +184,7 @@ def _start_session(session: ServiceSession, work: Any) -> None:
             session.logs.append(message)
 
         try:
-            result: ServiceTranscriptionResult = work(emit)
+            result = work(emit)
             session.result = result.to_dict()
             session.status = "completed"
         except Exception as exc:

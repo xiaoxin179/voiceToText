@@ -518,3 +518,44 @@ AI 自动化建议：
 2. 控制浏览器打开并播放目标视频。
 3. 轮询 `/sessions/{session_id}?result=1`。
 4. 根据 `status=completed` 后读取 `result.raw_text` 或 `result.timestamped_text`。
+
+## 媒体下载
+
+项目额外提供一个只负责“链接 -> 视频文件”的下载入口，不会启动 Whisper，也不会生成文字稿。底层使用 `yt-dlp` 支持的平台解析能力，适用于 Bilibili、YouTube、TikTok/Douyin、Instagram、X 等其已支持的平台。
+
+```powershell
+python main.py download-video "https://www.bilibili.com/video/BV..." --output-dir downloads --json
+```
+
+如平台需要登录态，优先使用 Firefox，或从已登录浏览器导出 Netscape 格式的 `cookies.txt`。新版 Chrome/Edge 的 App-Bound Cookie 加密可能导致第三方程序无法复用 Cookie：
+
+```powershell
+python main.py download-video "https://www.douyin.com/video/..." --cookies-file C:\path\to\cookies.txt --referer "https://www.douyin.com/"
+```
+
+对于浏览器已捕获的真实媒体地址，也可带上请求头下载：
+
+```powershell
+python main.py download-video "https://.../video.mp4" --referer "https://www.douyin.com/" --header "Authorization: Bearer ..."
+```
+
+本地 HTTP 服务也提供同步和异步入口：
+
+```powershell
+# 同步下载
+Invoke-RestMethod http://127.0.0.1:8765/download/video -Method Post -ContentType "application/json" -Body '{
+  "url": "https://www.bilibili.com/video/BV...",
+  "output_dir": "downloads"
+}'
+
+# 异步下载，随后查询 /sessions/{session_id}?result=1
+Invoke-RestMethod http://127.0.0.1:8765/sessions/download -Method Post -ContentType "application/json" -Body '{
+  "url": "https://www.bilibili.com/video/BV..."
+}'
+```
+
+### OmniGet 参考与许可证说明
+
+下载服务的产品方向和浏览器到本地服务的桥接思路，参考了 [OmniGet](https://github.com/tonhowtf/omniget) 的公开设计。OmniGet 使用 `yt-dlp` 覆盖 1,800+ 站点，并通过浏览器扩展将已捕获的媒体 URL、Referer、Cookie/请求头交给本地应用；这也是本项目后续适配受登录态限制平台时应持续关注的上游实现。
+
+本项目没有复制、链接或捆绑 OmniGet 的 GPL-3.0 源代码；这里的下载模块是独立实现，仅调用 `yt-dlp`。因此本段是来源说明和技术参考，不代表本项目是 OmniGet 的派生代码。请遵守平台条款、版权及当地法律，仅下载你有权访问和保存的内容。

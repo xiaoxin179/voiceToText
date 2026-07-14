@@ -13,10 +13,58 @@ import numpy as np
 from .asr import AsrWorker, Transcript
 from .audio_capture import AudioCapture, AudioChunk, AudioSource
 from .audio_devices import get_default_microphone, get_default_system_loopback
+from .media_downloader import MediaDownloadOptions, MediaDownloadResult, download_media
 from .text_converter import TextMode
 from .video_transcription import VideoTranscriptionOptions, transcribe_platform_video
 
 ProgressCallback = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class MediaDownloadServiceRequest:
+    url: str
+    output_dir: Path = Path("downloads")
+    cookie_browser: str = ""
+    cookies_file: Path | None = None
+    referer: str = ""
+    headers: tuple[str, ...] = ()
+    format_selector: str = "bv*+ba/b"
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any]) -> "MediaDownloadServiceRequest":
+        headers = data.get("headers") or []
+        if isinstance(headers, str):
+            headers = [headers]
+        if not isinstance(headers, list):
+            raise ValueError("headers must be a list of HTTP header strings")
+        cookies_file = str(data.get("cookies_file") or "").strip()
+        return cls(
+            url=str(data["url"]),
+            output_dir=Path(str(data.get("output_dir") or "downloads")),
+            cookie_browser=str(data.get("cookie_browser") or ""),
+            cookies_file=Path(cookies_file) if cookies_file else None,
+            referer=str(data.get("referer") or ""),
+            headers=tuple(str(header) for header in headers),
+            format_selector=str(data.get("format") or data.get("format_selector") or "bv*+ba/b"),
+        )
+
+
+def download_video_url(
+    request: MediaDownloadServiceRequest,
+    progress: ProgressCallback | None = None,
+) -> MediaDownloadResult:
+    return download_media(
+        MediaDownloadOptions(
+            url=request.url,
+            output_dir=request.output_dir,
+            cookie_browser=request.cookie_browser,
+            cookies_file=request.cookies_file,
+            referer=request.referer,
+            headers=request.headers,
+            format_selector=request.format_selector,
+        ),
+        progress=progress,
+    )
 
 
 @dataclass(frozen=True)

@@ -224,6 +224,11 @@ def _download_audio(
 
 
 def _yt_dlp_command_prefix() -> list[str]:
+    if getattr(sys, "frozen", False):
+        bundled = Path(sys.executable).with_name("yt-dlp.exe")
+        if bundled.is_file():
+            return [str(bundled)]
+        raise RuntimeError("打包版缺少 yt-dlp.exe 辅助组件。请重新下载完整的软件目录。")
     if importlib.util.find_spec("yt_dlp") is not None:
         return [sys.executable, "-m", "yt_dlp"]
 

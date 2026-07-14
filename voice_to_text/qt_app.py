@@ -44,6 +44,7 @@ from .audio_devices import (
     list_loopback_devices,
 )
 from .model_cache import required_models_error_message
+from .media_downloader import MediaDownloadOptions, MediaDownloadResult, download_media
 from .video_transcription import (
     DeepSeekOptimizationResult,
     VideoTranscriptionOptions,
@@ -188,6 +189,14 @@ class VideoAgentRuntimeState:
     started_at: float
 
 
+@dataclass
+class MediaDownloadRuntimeState:
+    progress_queue: queue.Queue[str]
+    result_queue: queue.Queue[MediaDownloadResult | Exception]
+    thread: threading.Thread
+    started_at: float
+
+
 class VoiceToTextWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -202,6 +211,7 @@ class VoiceToTextWindow(QMainWindow):
         self.runtime: RuntimeState | None = None
         self.video_runtime: VideoRuntimeState | None = None
         self.video_agent_runtime: VideoAgentRuntimeState | None = None
+        self.media_download_runtime: MediaDownloadRuntimeState | None = None
         self.video_result: VideoTranscriptionResult | None = None
         self.started_at = 0.0
 
@@ -524,18 +534,21 @@ class VoiceToTextWindow(QMainWindow):
 
         self.video_start_button = QPushButton("开始转写")
         self.video_start_button.setObjectName("primaryButton")
+        self.video_download_button = QPushButton("下载视频")
+        self.video_download_button.setObjectName("primaryButton")
         self.video_stop_button = QPushButton("停止")
         self.video_stop_button.setObjectName("dangerButton")
         self.video_stop_button.setEnabled(False)
         self.video_clear_button = QPushButton("清空结果")
         self.video_start_button.setIcon(create_line_icon("play", "#ffffff"))
+        self.video_download_button.setIcon(create_line_icon("video", "#ffffff"))
         self.video_stop_button.setIcon(create_line_icon("stop", SWISS_MUTED))
         self.video_clear_button.setIcon(create_line_icon("clear", SWISS_BLACK))
-        for button in (self.video_start_button, self.video_stop_button, self.video_clear_button):
+        for button in (self.video_start_button, self.video_download_button, self.video_stop_button, self.video_clear_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setIconSize(QSize(16, 16))
 
-        sidebar_layout.addWidget(self._section_title("平台视频", "输入视频链接并下载音频后本地转写"))
+        sidebar_layout.addWidget(self._section_title("平台视频", "可直接下载视频，或下载音频后本地转写"))
         source_form = self._make_form()
         source_form.addRow("链接", self.video_url_input)
         source_form.addRow("Cookie", self.video_cookie_combo)
@@ -551,6 +564,7 @@ class VoiceToTextWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         button_row.setSpacing(10)
+        button_row.addWidget(self.video_download_button)
         button_row.addWidget(self.video_start_button)
         button_row.addWidget(self.video_stop_button)
         button_row.addWidget(self.video_clear_button)
@@ -975,6 +989,7 @@ class VoiceToTextWindow(QMainWindow):
         self.video_device_combo.currentTextChanged.connect(self._sync_video_compute_default)
         self.video_settings_button.clicked.connect(self.show_video_settings)
         self.video_start_button.clicked.connect(self.start_video_transcription)
+        self.video_download_button.clicked.connect(self.start_media_download)
         self.video_optimize_button.clicked.connect(self.start_video_agent_optimization)
         self.video_stop_button.clicked.connect(self.stop_video_transcription)
         self.video_clear_button.clicked.connect(self.clear_video_transcripts)
@@ -1184,7 +1199,7 @@ class VoiceToTextWindow(QMainWindow):
         self._set_status("文本已清空", "idle")
 
     def start_video_transcription(self) -> None:
-        if self.video_runtime:
+        if self.video_runtime or self.media_download_runtime:
             return
 
         url = self.video_url_input.text().strip()
@@ -1233,7 +1248,42 @@ class VoiceToTextWindow(QMainWindow):
         self._set_status("平台视频转写处理中", "working")
         thread.start()
 
+    def start_media_download(self) -> None:
+        if self.video_runtime or self.media_download_runtime:
+            return
+
+        url = self.video_url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "缺少视频链接", "请先粘贴要下载的视频链接。")
+            return
+
+        options = MediaDownloadOptions(
+            url=url,
+            output_dir=Path("downloads"),
+            cookie_browser=self.video_cookie_combo.currentData(),
+        )
+        progress_queue: queue.Queue[str] = queue.Queue()
+        result_queue: queue.Queue[MediaDownloadResult | Exception] = queue.Queue()
+
+        def worker() -> None:
+            try:
+                result_queue.put(download_media(options, progress=progress_queue.put))
+            except Exception as exc:
+                result_queue.put(exc)
+
+        thread = threading.Thread(target=worker, name="media-download-worker", daemon=True)
+        self.media_download_runtime = MediaDownloadRuntimeState(progress_queue, result_queue, thread, time.time())
+        self.video_log_text.clear()
+        self.append_video_log(f"开始下载视频: {url}")
+        self._set_video_running_ui(True)
+        self._set_status("视频下载处理中", "working")
+        thread.start()
+
     def stop_video_transcription(self) -> None:
+        if self.media_download_runtime:
+            self.video_stop_button.setEnabled(False)
+            self.append_video_log("下载任务正在收尾；当前下载器会在本次请求完成后返回。")
+            return
         runtime = self.video_runtime
         if not runtime:
             return
@@ -1291,6 +1341,7 @@ class VoiceToTextWindow(QMainWindow):
 
     def _set_video_running_ui(self, running: bool) -> None:
         self.video_start_button.setEnabled(not running)
+        self.video_download_button.setEnabled(not running)
         self.video_stop_button.setEnabled(running)
         self._set_video_inputs_enabled(not running)
         self.video_optimize_button.setEnabled(
@@ -1315,6 +1366,7 @@ class VoiceToTextWindow(QMainWindow):
     def poll_runtime(self) -> None:
         runtime = self.runtime
         self.poll_video_runtime()
+        self.poll_media_download_runtime()
         self.poll_video_agent_runtime()
         if not runtime:
             return
@@ -1408,6 +1460,38 @@ class VoiceToTextWindow(QMainWindow):
         self.video_optimize_button.setEnabled(True)
         self._set_status("平台视频转写完成", "idle")
 
+    def poll_media_download_runtime(self) -> None:
+        runtime = self.media_download_runtime
+        if not runtime:
+            return
+
+        while True:
+            try:
+                self.append_video_log(runtime.progress_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        try:
+            result = runtime.result_queue.get_nowait()
+        except queue.Empty:
+            if self.pages.currentIndex() == 1:
+                elapsed = int(time.time() - runtime.started_at)
+                self._set_status(f"视频下载处理中... {elapsed}s", "working")
+            return
+
+        self.media_download_runtime = None
+        self._set_video_running_ui(False)
+        if isinstance(result, Exception):
+            self.append_video_log(f"下载失败: {result}")
+            self._set_status("视频下载失败", "error")
+            QMessageBox.critical(self, "视频下载失败", str(result))
+            return
+
+        self.append_video_log(f"视频文件: {result.media_path}")
+        if result.title:
+            self.append_video_log(f"标题: {result.title}")
+        self._set_status("视频下载完成", "idle")
+
     def poll_video_agent_runtime(self) -> None:
         runtime = self.video_agent_runtime
         if not runtime:
@@ -1485,6 +1569,7 @@ class VoiceToTextWindow(QMainWindow):
         self.stop_listening()
         self.stop_video_transcription()
         self.video_agent_runtime = None
+        self.media_download_runtime = None
         event.accept()
 
 

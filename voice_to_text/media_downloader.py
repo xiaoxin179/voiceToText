@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import time
+import re
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -55,9 +57,11 @@ def download_media(options: MediaDownloadOptions, progress: ProgressCallback | N
     """
 
     progress = progress or (lambda _message: None)
-    source_url = options.url.strip()
+    source_url = _normalize_media_url(options.url)
     if not source_url:
         raise ValueError("url must not be empty")
+    if source_url != options.url.strip():
+        progress(f"抖音链接已规范化为视频页: {source_url}")
     if options.cookie_browser and options.cookies_file:
         raise ValueError("cookie_browser and cookies_file cannot be used together")
     if options.cookies_file and not options.cookies_file.is_file():
@@ -136,6 +140,26 @@ def _create_output_dir(base_dir: Path) -> Path:
         suffix += 1
     candidate.mkdir()
     return candidate
+
+
+def _normalize_media_url(url: str) -> str:
+    """Turn Douyin sharing/modal URLs into the video URL yt-dlp expects."""
+
+    text = url.strip()
+    parsed = urllib.parse.urlparse(text)
+    host = parsed.netloc.lower()
+    if "douyin.com" not in host and "iesdouyin.com" not in host:
+        return text
+    match = re.search(r"/(?:share/)?video/(\d+)", parsed.path)
+    if match:
+        return f"https://www.douyin.com/video/{match.group(1)}"
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ("modal_id", "vid", "aweme_id", "item_id"):
+        for value in query.get(key, []):
+            match = re.search(r"\d{8,}", value)
+            if match:
+                return f"https://www.douyin.com/video/{match.group(0)}"
+    return text
 
 
 def _yt_dlp_command_prefix() -> list[str]:

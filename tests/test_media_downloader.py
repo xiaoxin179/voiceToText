@@ -5,11 +5,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from voice_to_text.media_downloader import MediaDownloadOptions, _find_downloaded_media, download_media
+from voice_to_text.media_downloader import MediaDownloadOptions, _find_downloaded_media, _normalize_media_url, download_media
 from voice_to_text.service_core import MediaDownloadServiceRequest
 
 
 class MediaDownloaderTests(unittest.TestCase):
+    def test_normalizes_douyin_modal_link(self) -> None:
+        self.assertEqual(
+            _normalize_media_url("https://www.douyin.com/jingxuan?modal_id=7660026038541405450"),
+            "https://www.douyin.com/video/7660026038541405450",
+        )
+
     def test_request_parses_headers_and_cookie_file(self) -> None:
         request = MediaDownloadServiceRequest.from_mapping(
             {

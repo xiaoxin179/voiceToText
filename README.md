@@ -539,6 +539,32 @@ python main.py download-video "https://www.douyin.com/video/..." --cookies-file 
 python main.py download-video "https://.../video.mp4" --referer "https://www.douyin.com/" --header "Authorization: Bearer ..."
 ```
 
+### OmniGet backend (optional)
+
+OmniGet can be used as an optional local download backend for platforms such as
+Douyin. The integration uses OmniGet's documented authenticated localhost
+bridge; no OmniGet source code is copied into this project.
+
+1. Install and launch OmniGet.
+2. In OmniGet, open **Settings -> Network -> Browser extension** and copy the
+   local bridge URL and token.
+3. Either pass both values to the CLI, or configure them as environment
+   variables for the desktop app and service process:
+
+```powershell
+$env:OMNIGET_BRIDGE_URL="http://127.0.0.1:47720"
+$env:OMNIGET_BRIDGE_TOKEN="your-OmniGet-token"
+python main.py download-video "https://www.douyin.com/video/..." --backend omniget --json
+```
+
+`--backend auto` is the default. It uses OmniGet when both bridge values are
+configured, and otherwise uses `yt-dlp`. `--backend omniget` fails clearly when
+the bridge is unavailable. OmniGet only acknowledges that a URL was queued;
+the resulting file path and progress remain managed by OmniGet itself.
+
+The HTTP `POST /download/video` and `POST /sessions/download` payloads accept
+the same optional fields: `backend`, `omniget_endpoint`, and `omniget_token`.
+
 本地 HTTP 服务也提供同步和异步入口：
 
 ```powershell

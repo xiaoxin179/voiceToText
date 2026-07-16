@@ -1487,10 +1487,13 @@ class VoiceToTextWindow(QMainWindow):
             QMessageBox.critical(self, "视频下载失败", str(result))
             return
 
-        self.append_video_log(f"视频文件: {result.media_path}")
+        if result.status == "queued":
+            self.append_video_log("已交给 OmniGet 下载。请在 OmniGet 窗口查看进度和保存位置。")
+        else:
+            self.append_video_log(f"视频文件: {result.media_path}")
         if result.title:
             self.append_video_log(f"标题: {result.title}")
-        self._set_status("视频下载完成", "idle")
+        self._set_status("已交给 OmniGet 下载" if result.status == "queued" else "视频下载完成", "idle")
 
     def poll_video_agent_runtime(self) -> None:
         runtime = self.video_agent_runtime

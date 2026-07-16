@@ -29,6 +29,9 @@ class MediaDownloadServiceRequest:
     referer: str = ""
     headers: tuple[str, ...] = ()
     format_selector: str = "bv*+ba/b"
+    backend: str = "auto"
+    omniget_endpoint: str = ""
+    omniget_token: str = ""
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "MediaDownloadServiceRequest":
@@ -46,6 +49,9 @@ class MediaDownloadServiceRequest:
             referer=str(data.get("referer") or ""),
             headers=tuple(str(header) for header in headers),
             format_selector=str(data.get("format") or data.get("format_selector") or "bv*+ba/b"),
+            backend=str(data.get("backend") or "auto"),
+            omniget_endpoint=str(data.get("omniget_endpoint") or ""),
+            omniget_token=str(data.get("omniget_token") or ""),
         )
 
 
@@ -62,6 +68,9 @@ def download_video_url(
             referer=request.referer,
             headers=request.headers,
             format_selector=request.format_selector,
+            backend=request.backend,
+            omniget_endpoint=request.omniget_endpoint,
+            omniget_token=request.omniget_token,
         ),
         progress=progress,
     )

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
 import time
 import re
 import urllib.parse
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -27,30 +30,37 @@ class MediaDownloadOptions:
     referer: str = ""
     headers: tuple[str, ...] = ()
     format_selector: str = "bv*+ba/b"
+    backend: str = "auto"
+    omniget_endpoint: str = ""
+    omniget_token: str = ""
 
 
 @dataclass(frozen=True)
 class MediaDownloadResult:
-    media_path: Path
+    media_path: Path | None
     output_dir: Path
     title: str = ""
     media_id: str = ""
     extractor: str = ""
     source_url: str = ""
+    backend: str = "yt-dlp"
+    status: str = "completed"
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str | None]:
         return {
-            "media_path": str(self.media_path),
+            "media_path": str(self.media_path) if self.media_path else None,
             "output_dir": str(self.output_dir),
             "title": self.title,
             "media_id": self.media_id,
             "extractor": self.extractor,
             "source_url": self.source_url,
+            "backend": self.backend,
+            "status": self.status,
         }
 
 
 def download_media(options: MediaDownloadOptions, progress: ProgressCallback | None = None) -> MediaDownloadResult:
-    """Download the best available video for a URL through yt-dlp.
+    """Download through OmniGet when configured, otherwise through yt-dlp.
 
     The caller may supply exported cookies or request headers captured from a
     browser. This avoids reading Chromium's encrypted cookie database.
@@ -66,6 +76,24 @@ def download_media(options: MediaDownloadOptions, progress: ProgressCallback | N
         raise ValueError("cookie_browser and cookies_file cannot be used together")
     if options.cookies_file and not options.cookies_file.is_file():
         raise ValueError(f"cookies_file does not exist: {options.cookies_file}")
+    backend = _normalized_backend(options.backend)
+
+    if backend in ("auto", "omniget"):
+        try:
+            queued = _enqueue_with_omniget(options, source_url, progress)
+        except RuntimeError as exc:
+            if backend == "omniget":
+                raise
+            progress(f"OmniGet unavailable, falling back to yt-dlp: {exc}")
+        else:
+            if queued:
+                return MediaDownloadResult(
+                    media_path=None,
+                    output_dir=options.output_dir,
+                    source_url=source_url,
+                    backend="omniget",
+                    status="queued",
+                )
 
     output_dir = _create_output_dir(options.output_dir)
     output_template = output_dir / "%(title).160B [%(id)s].%(ext)s"
@@ -127,7 +155,84 @@ def download_media(options: MediaDownloadOptions, progress: ProgressCallback | N
         media_id=str(metadata.get("id") or ""),
         extractor=str(metadata.get("extractor_key") or metadata.get("extractor") or ""),
         source_url=str(metadata.get("webpage_url") or source_url),
+        backend="yt-dlp",
     )
+
+
+def _normalized_backend(value: str) -> str:
+    backend = value.strip().lower() or "auto"
+    if backend not in {"auto", "yt-dlp", "omniget"}:
+        raise ValueError("backend must be auto, yt-dlp, or omniget")
+    return backend
+
+
+def _enqueue_with_omniget(
+    options: MediaDownloadOptions,
+    source_url: str,
+    progress: ProgressCallback,
+) -> bool:
+    """Queue a URL through OmniGet's documented localhost bridge.
+
+    OmniGet owns the actual output location and download lifecycle. Its bridge
+    acknowledges enqueueing only, so callers must not treat this as a finished
+    local file download.
+    """
+
+    endpoint = (options.omniget_endpoint or os.environ.get("OMNIGET_BRIDGE_URL", "")).strip().rstrip("/")
+    token = (options.omniget_token or os.environ.get("OMNIGET_BRIDGE_TOKEN", "")).strip()
+    if not endpoint or not token:
+        if _normalized_backend(options.backend) == "omniget":
+            raise RuntimeError(
+                "OmniGet bridge is not configured. Set OMNIGET_BRIDGE_URL and "
+                "OMNIGET_BRIDGE_TOKEN, or provide --omniget-endpoint and --omniget-token."
+            )
+        return False
+    if not endpoint.startswith(("http://127.0.0.1", "http://localhost")):
+        raise RuntimeError("OmniGet bridge endpoint must be a local HTTP address")
+
+    headers = _headers_as_mapping(options.headers)
+    payload: dict[str, object] = {
+        "url": source_url,
+        "protocolVersion": 1,
+        "openApp": True,
+        "pageUrl": source_url,
+    }
+    if options.referer.strip():
+        payload["referer"] = options.referer.strip()
+    if headers:
+        payload["headers"] = headers
+    request = urllib.request.Request(
+        f"{endpoint}/v1/enqueue",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OmniGet bridge rejected the request ({exc.code}): {detail}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"could not reach OmniGet bridge at {endpoint}: {exc}") from exc
+    if not isinstance(body, dict) or not body.get("ok"):
+        message = body.get("message") if isinstance(body, dict) else "invalid response"
+        raise RuntimeError(f"OmniGet bridge did not accept the request: {message}")
+    progress(f"Queued in OmniGet: {source_url}")
+    progress("OmniGet manages the file location and download progress in its own window.")
+    return True
+
+
+def _headers_as_mapping(headers: tuple[str, ...]) -> dict[str, str]:
+    mapped: dict[str, str] = {}
+    for header in headers:
+        name, separator, value = header.partition(":")
+        if separator and name.strip() and value.strip():
+            mapped[name.strip()] = value.strip()
+    return mapped
 
 
 def _create_output_dir(base_dir: Path) -> Path:

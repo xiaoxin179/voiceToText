@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,6 +60,66 @@ class MediaDownloaderTests(unittest.TestCase):
 
             self.assertEqual(result.media_path, downloaded)
             self.assertTrue(result.output_dir.is_dir())
+
+    def test_queues_media_in_omniget_bridge(self) -> None:
+        captured = {}
+
+        class Response:
+            def read(self) -> bytes:
+                return b'{"ok": true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+        def fake_urlopen(request, timeout: int):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            captured["timeout"] = timeout
+            return Response()
+
+        with patch("voice_to_text.media_downloader.urllib.request.urlopen", side_effect=fake_urlopen):
+            result = download_media(
+                MediaDownloadOptions(
+                    url="https://www.douyin.com/jingxuan?modal_id=7660026038541405450",
+                    backend="omniget",
+                    omniget_endpoint="http://127.0.0.1:47720/",
+                    omniget_token="test-token",
+                    referer="https://www.douyin.com/",
+                    headers=("X-Test: value",),
+                )
+            )
+
+        self.assertEqual(result.status, "queued")
+        self.assertEqual(result.backend, "omniget")
+        self.assertIsNone(result.media_path)
+        self.assertEqual(captured["url"], "http://127.0.0.1:47720/v1/enqueue")
+        self.assertEqual(captured["headers"]["Authorization"], "Bearer test-token")
+        self.assertEqual(captured["body"]["url"], "https://www.douyin.com/video/7660026038541405450")
+        self.assertEqual(captured["body"]["headers"], {"X-Test": "value"})
+
+    def test_auto_backend_falls_back_to_ytdlp_when_omniget_is_not_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            downloaded = root / "video.mp4"
+            downloaded.write_bytes(b"video")
+
+            class Completed:
+                returncode = 0
+                stdout = f"{downloaded}\n"
+                stderr = ""
+
+            with patch("voice_to_text.media_downloader._yt_dlp_command_prefix", return_value=["yt-dlp"]), patch(
+                "voice_to_text.media_downloader.subprocess.run", return_value=Completed()
+            ):
+                result = download_media(MediaDownloadOptions(url="https://example.com/video", output_dir=root))
+
+        self.assertEqual(result.backend, "yt-dlp")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.media_path, downloaded)
 
     def test_finds_latest_media_when_ytdlp_does_not_print_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:

@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--referer", default="")
     download.add_argument("--header", action="append", default=[], help="Extra request header, for example: Authorization: Bearer ...")
     download.add_argument("--format", default="bv*+ba/b", dest="format_selector")
+    download.add_argument("--backend", choices=["auto", "yt-dlp", "omniget"], default="auto")
+    download.add_argument("--omniget-endpoint", default="", help="OmniGet local bridge, for example http://127.0.0.1:47720")
+    download.add_argument("--omniget-token", default="", help="OmniGet local bridge bearer token")
     download.add_argument("--json", action="store_true", help="Print machine-readable JSON to stdout")
 
     speaker = subparsers.add_parser("transcribe-speaker", help="Record system speaker/mic audio and transcribe it")
@@ -234,6 +237,9 @@ def cmd_download_video(args: argparse.Namespace) -> int:
         referer=args.referer,
         headers=tuple(args.header),
         format_selector=args.format_selector,
+        backend=args.backend,
+        omniget_endpoint=args.omniget_endpoint,
+        omniget_token=args.omniget_token,
     )
     result = download_video_url(request, progress=_cli_progress(args.json))
     data = result.to_dict()
@@ -241,7 +247,10 @@ def cmd_download_video(args: argparse.Namespace) -> int:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
         print()
-        print(f"Downloaded media: {data['media_path']}")
+        if data["status"] == "queued":
+            print("Queued in OmniGet. Open OmniGet to see progress and the configured download location.")
+        else:
+            print(f"Downloaded media: {data['media_path']}")
         if data["title"]:
             print(f"Title: {data['title']}")
     return 0

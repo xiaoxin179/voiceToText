@@ -10,7 +10,7 @@ from typing import Literal
 
 import numpy as np
 
-from .audio_devices import AudioDevice, _load_pyaudio
+from .audio_devices import AudioDevice, _load_pyaudio, resolve_device
 
 AudioSource = Literal["mic", "system"]
 _PORTAUDIO_OPEN_LOCK = threading.Lock()
@@ -79,9 +79,9 @@ class AudioCapture(threading.Thread):
         if self.debug_queue is not None:
             self.debug_queue.put(CaptureDebugEvent(self.source, message, time.time()))
 
-    def _channel_candidates(self) -> list[int]:
+    def _channel_candidates(self, max_input_channels: int) -> list[int]:
         candidates = [
-            self.device.max_input_channels,
+            max_input_channels,
             2,
             1,
         ]
@@ -106,20 +106,30 @@ class AudioCapture(threading.Thread):
 
     def run(self) -> None:
         pyaudio = _load_pyaudio()
-        source_rate = self.device.default_sample_rate
-        frames_per_buffer = int(source_rate * 0.1)
-        frames_per_chunk = int(source_rate * self.chunk_seconds)
 
         pa = None
         stream = None
         try:
             with _PORTAUDIO_OPEN_LOCK:
                 pa = pyaudio.PyAudio()
+                device = resolve_device(
+                    pa,
+                    self.device,
+                    require_loopback=self.source == "system",
+                )
+                if device.index != self.device.index:
+                    self._debug(
+                        f"device index changed: {self.device.index} -> {device.index}; "
+                        f"resolved by identity as {device.name}"
+                    )
+                source_rate = device.default_sample_rate
+                frames_per_buffer = int(source_rate * 0.1)
+                frames_per_chunk = int(source_rate * self.chunk_seconds)
                 channels = 0
-                for candidate_channels in self._channel_candidates():
+                for candidate_channels in self._channel_candidates(device.max_input_channels):
                     try:
                         self._debug(
-                            f"opening device index={self.device.index}, rate={source_rate}, "
+                            f"opening device index={device.index}, rate={source_rate}, "
                             f"channels={candidate_channels}, chunk={self.chunk_seconds}s"
                         )
                         stream = pa.open(
@@ -127,7 +137,7 @@ class AudioCapture(threading.Thread):
                             channels=candidate_channels,
                             rate=source_rate,
                             input=True,
-                            input_device_index=self.device.index,
+                            input_device_index=device.index,
                             frames_per_buffer=frames_per_buffer,
                         )
                         channels = candidate_channels
@@ -190,15 +200,16 @@ class AudioCapture(threading.Thread):
 
 def record_wav(device: AudioDevice, output_path: Path, seconds: float = 5.0) -> None:
     pyaudio = _load_pyaudio()
-    sample_rate = device.default_sample_rate
     frames_per_buffer = 1024
-    total_frames = int(sample_rate / frames_per_buffer * seconds)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with pyaudio.PyAudio() as pa:
+        resolved_device = resolve_device(pa, device, require_loopback=device.is_loopback)
+        sample_rate = resolved_device.default_sample_rate
+        total_frames = int(sample_rate / frames_per_buffer * seconds)
         stream = None
         channels = 0
-        for candidate_channels in [device.max_input_channels, 2, 1]:
+        for candidate_channels in [resolved_device.max_input_channels, 2, 1]:
             if candidate_channels <= 0:
                 continue
             try:
@@ -208,7 +219,7 @@ def record_wav(device: AudioDevice, output_path: Path, seconds: float = 5.0) -> 
                         channels=candidate_channels,
                         rate=sample_rate,
                         input=True,
-                        input_device_index=device.index,
+                        input_device_index=resolved_device.index,
                         frames_per_buffer=frames_per_buffer,
                     )
                 channels = candidate_channels

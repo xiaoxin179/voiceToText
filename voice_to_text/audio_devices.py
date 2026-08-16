@@ -99,6 +99,45 @@ def get_default_system_loopback() -> AudioDevice:
         return _to_device(pa, info, is_loopback=True)
 
 
+def resolve_device(
+    pa,
+    requested: AudioDevice,
+    *,
+    require_loopback: bool,
+) -> AudioDevice:
+    """Resolve a saved UI selection against the current PortAudio device list."""
+
+    def is_valid(device: AudioDevice) -> bool:
+        if device.host_api != requested.host_api or device.name != requested.name:
+            return False
+        if require_loopback:
+            return device.is_loopback and device.max_input_channels > 0
+        return not device.is_loopback and device.max_input_channels > 0
+
+    try:
+        current = _to_device(pa, pa.get_device_info_by_index(requested.index))
+        if is_valid(current):
+            return current
+    except Exception:
+        pass
+
+    infos = (
+        pa.get_loopback_device_info_generator()
+        if require_loopback
+        else pa.get_device_info_generator()
+    )
+    for info in infos:
+        candidate = _to_device(pa, info, is_loopback=require_loopback)
+        if is_valid(candidate):
+            return candidate
+
+    source_name = "system loopback" if require_loopback else "microphone"
+    raise RuntimeError(
+        f"The selected {source_name} device is no longer available: {requested.name}. "
+        "Refresh devices and select it again."
+    )
+
+
 def format_devices(devices: Iterable[AudioDevice]) -> str:
     rows = [
         "index | in | out | rate | loopback | host api | name",

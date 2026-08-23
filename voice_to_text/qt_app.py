@@ -5,10 +5,11 @@ import threading
 import time
 import os
 import ctypes
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PyQt6.QtCore import QPointF, QProcess, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPalette, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QApplication,
@@ -38,9 +39,11 @@ from .asr import AsrWorker, Transcript
 from .audio_capture import AudioCapture, AudioChunk
 from .audio_devices import (
     AudioDevice,
+    device_fingerprint,
     get_default_microphone,
     get_default_system_loopback,
     list_devices,
+    list_devices_in_fresh_process,
     list_loopback_devices,
 )
 from .model_cache import required_models_error_message
@@ -984,7 +987,7 @@ class VoiceToTextWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_listening)
         self.stop_button.clicked.connect(self.stop_listening)
         self.clear_button.clicked.connect(self.clear_transcripts)
-        self.refresh_button.clicked.connect(self.refresh_devices)
+        self.refresh_button.clicked.connect(lambda: self.refresh_devices(check_hotplug=True))
         self.device_combo.currentTextChanged.connect(self._sync_compute_default)
         self.video_device_combo.currentTextChanged.connect(self._sync_video_compute_default)
         self.video_settings_button.clicked.connect(self.show_video_settings)
@@ -1059,9 +1062,14 @@ class VoiceToTextWindow(QMainWindow):
     def _sync_video_compute_default(self, device: str) -> None:
         self.video_compute_combo.setCurrentText("int8" if device == "cpu" else "float16")
 
-    def refresh_devices(self) -> None:
+    def refresh_devices(self, *, check_hotplug: bool = False) -> None:
         try:
             devices = list_devices()
+            if check_hotplug:
+                fresh_devices = list_devices_in_fresh_process()
+                if device_fingerprint(devices) != device_fingerprint(fresh_devices):
+                    self._restart_for_audio_device_change()
+                    return
             self.mic_devices = [device for device in devices if device.max_input_channels > 0 and not device.is_loopback]
             self.system_devices = list_loopback_devices()
             default_mic = get_default_microphone()
@@ -1076,6 +1084,44 @@ class VoiceToTextWindow(QMainWindow):
             f"已加载 {len(self.mic_devices)} 个输入设备和 {len(self.system_devices)} 个系统音频设备"
         )
         self._set_status("设备已刷新", "idle")
+
+    def _restart_for_audio_device_change(self) -> None:
+        if self.runtime:
+            QMessageBox.warning(
+                self,
+                "音频设备已变化",
+                "检测到新增或移除的音频设备。请先停止监听，再点击刷新设备。",
+            )
+            return
+
+        has_transcript = any(
+            editor.toPlainText().strip()
+            for editor in (self.mic_text, self.system_text, self.timeline_text)
+        )
+        if has_transcript:
+            answer = QMessageBox.question(
+                self,
+                "需要重启音频引擎",
+                "检测到音频设备发生变化。刷新蓝牙耳机需要重启程序，当前转写内容会被清空。是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        if getattr(sys, "frozen", False):
+            program = sys.executable
+            arguments = sys.argv[1:]
+        else:
+            program = sys.executable
+            arguments = [str(Path(sys.argv[0]).resolve()), *sys.argv[1:]]
+
+        started, _process_id = QProcess.startDetached(program, arguments, str(Path.cwd()))
+        if not started:
+            QMessageBox.critical(self, "重启失败", "无法重启程序，请手动关闭后重新打开。")
+            return
+
+        QApplication.instance().quit()
 
     def _fill_device_combo(self, combo: QComboBox, devices: list[AudioDevice], default_index: int) -> None:
         combo.clear()

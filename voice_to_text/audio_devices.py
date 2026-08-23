@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import subprocess
+import sys
+from dataclasses import asdict, dataclass
 from typing import Iterable
 
 
@@ -52,6 +55,37 @@ def list_devices() -> list[AudioDevice]:
         for info in pa.get_device_info_generator():
             devices.append(_to_device(pa, info))
     return devices
+
+
+def device_fingerprint(devices: Iterable[AudioDevice]) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        sorted(
+            (
+                device.name,
+                device.host_api,
+                device.max_input_channels,
+                device.max_output_channels,
+                device.default_sample_rate,
+                device.is_loopback,
+            )
+            for device in devices
+        )
+    )
+
+
+def list_devices_in_fresh_process() -> list[AudioDevice]:
+    completed = subprocess.run(
+        [sys.executable, "-m", "voice_to_text.audio_devices", "--json"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"Fresh audio device scan failed: {detail}")
+    return [AudioDevice(**item) for item in json.loads(completed.stdout)]
 
 
 def list_loopback_devices() -> list[AudioDevice]:
@@ -154,3 +188,9 @@ def format_devices(devices: Iterable[AudioDevice]) -> str:
             f"{device.name}"
         )
     return "\n".join(rows)
+
+
+if __name__ == "__main__":
+    if "--json" not in sys.argv:
+        raise SystemExit("Use --json to scan audio devices.")
+    print(json.dumps([asdict(device) for device in list_devices()], ensure_ascii=True))

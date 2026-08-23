@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from voice_to_text.audio_devices import AudioDevice, resolve_device
+from voice_to_text.audio_devices import (
+    AudioDevice,
+    device_fingerprint,
+    list_devices_in_fresh_process,
+    resolve_device,
+)
 
 
 class FakePyAudio:
@@ -71,6 +77,29 @@ class ResolveDeviceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "system loopback"):
             resolve_device(pa, requested, require_loopback=True)
+
+    def test_device_fingerprint_ignores_index_changes(self) -> None:
+        first = AudioDevice(20, "Headphones", "Windows WASAPI", 0, 2, 48000, False)
+        second = AudioDevice(28, "Headphones", "Windows WASAPI", 0, 2, 48000, False)
+
+        self.assertEqual(device_fingerprint([first]), device_fingerprint([second]))
+
+    def test_fresh_process_scan_deserializes_devices(self) -> None:
+        class Completed:
+            returncode = 0
+            stdout = (
+                '[{"index": 28, "name": "Headphones [Loopback]", '
+                '"host_api": "Windows WASAPI", "max_input_channels": 2, '
+                '"max_output_channels": 0, "default_sample_rate": 48000, '
+                '"is_loopback": true}]'
+            )
+            stderr = ""
+
+        with patch("voice_to_text.audio_devices.subprocess.run", return_value=Completed()):
+            devices = list_devices_in_fresh_process()
+
+        self.assertEqual(devices[0].index, 28)
+        self.assertTrue(devices[0].is_loopback)
 
 
 if __name__ == "__main__":

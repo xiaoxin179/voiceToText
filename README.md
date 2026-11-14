@@ -1,5 +1,23 @@
 # Voice To Text 技术方案
 
+## Agent Skill 安装
+
+项目自带配套 [voice-to-text-cli Skill](skills/voice-to-text-cli/SKILL.md)，与 CLI 一起维护。GUI 和手动 CLI 不需要安装 Skill；希望 Codex 等 Agent 按项目约定执行转写、录音和队列操作时，建议安装。
+
+Skill 不包含 Python 环境、模型或 API Key，请先按下文安装软件依赖和所需模型。在项目根目录运行以下 PowerShell 命令：
+
+```powershell
+$skillRoot = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'skills' } else { Join-Path $env:USERPROFILE '.codex/skills' }
+New-Item -ItemType Directory -Path $skillRoot -Force | Out-Null
+Copy-Item -LiteralPath './skills/voice-to-text-cli' -Destination $skillRoot -Recurse
+```
+
+如果目标目录已存在，请先比较并备份个人定制，再用 `Copy-Item` 的 `-Force` 参数更新。其他支持 `SKILL.md` 的 Agent 可以把同一文件夹复制到各自的技能目录。
+
+安装后开启新会话，在项目目录中使用 `$voice-to-text-cli`，或直接说“录制一分钟系统音频并返回文字”。仓库版使用实际项目位置和 Python 环境，不依赖作者的本机路径或私人知识库。软件更新后，若 `skills/voice-to-text-cli` 有变更，需要同步更新已安装的副本。
+
+添加转换任务不会自动执行，仍需活跃 Agent 按 [转换任务协议](docs/conversion-tasks.md) 领取处理。
+
 ## CLI 与客户端功能对齐
 
 CLI 已补齐客户端的独立文字稿优化、双路设备选择、任务批量添加、筛选分页、结果读取、日志和目录打开。

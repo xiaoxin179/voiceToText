@@ -1,0 +1,6 @@
+﻿interface:
+  display_name: "Voice To Text CLI"
+  short_description: "Transcribe, optimize, and manage Voice Studio tasks."
+  default_prompt: "Use $voice-to-text-cli to transcribe audio or video, optimize an existing transcript, or manage Voice Studio conversion tasks."
+policy:
+  allow_implicit_invocation: true

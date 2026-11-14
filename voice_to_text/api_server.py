@@ -11,6 +11,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from .task_store import TaskStore
 
 from .service_core import (
     MediaDownloadServiceRequest,
@@ -36,6 +37,9 @@ class ServiceSession:
     error: str | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
+    phase: str = "queued"
+    ready_at: float | None = None
+    config: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self, include_result: bool = False) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -47,6 +51,10 @@ class ServiceSession:
             "finished_at": self.finished_at,
             "error": self.error,
             "logs": self.logs[-200:],
+            "phase": self.phase,
+            "ready": self.status == "running" and self.phase == "capturing" and not self.stop_event.is_set(),
+            "ready_at": self.ready_at,
+            "config": self.config,
         }
         if include_result:
             data["result"] = self.result
@@ -72,6 +80,14 @@ class SessionStore:
         with self._lock:
             return sorted(self._sessions.values(), key=lambda item: item.created_at, reverse=True)
 
+    def create_speaker(self, config: dict[str, Any]) -> ServiceSession:
+        with self._lock:
+            if any(s.kind == "speaker" and s.status in ("queued", "running") for s in self._sessions.values()):
+                raise ValueError("a speaker session is already active; stop it and wait for completion")
+            session = ServiceSession(id=f"speaker_{uuid.uuid4().hex[:12]}", kind="speaker", config=config)
+            self._sessions[session.id] = session
+            return session
+
 
 STORE = SessionStore()
 
@@ -84,6 +100,12 @@ class VoiceToTextHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/health":
                 self._send_json({"ok": True, "service": "voice-to-text"})
+                return
+            if parsed.path == "/tasks":
+                self._send_json({"tasks": TaskStore().list(parse_qs(parsed.query).get("status", [None])[0])})
+                return
+            if parsed.path.startswith("/tasks/"):
+                self._send_json(TaskStore().get(parsed.path.removeprefix("/tasks/").strip("/")))
                 return
             if parsed.path == "/sessions":
                 self._send_json({"sessions": [session.to_dict() for session in STORE.list()]})
@@ -99,6 +121,8 @@ class VoiceToTextHandler(BaseHTTPRequestHandler):
                 self._send_json(session.to_dict(include_result=include_result))
                 return
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+        except KeyError:
+            self._send_json({"error": "task not found"}, status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_error(exc)
 
@@ -106,6 +130,27 @@ class VoiceToTextHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             data = self._read_json()
+            if parsed.path == "/tasks":
+                self._send_json(TaskStore().add(data, bool(data.get("allow_duplicate", False))), status=HTTPStatus.CREATED)
+                return
+            if parsed.path == "/tasks/claim":
+                self._send_json({"task": TaskStore().claim(data.get("owner", "codex"), data.get("task_id"))})
+                return
+            if parsed.path.startswith("/tasks/"):
+                parts = parsed.path.strip("/").split("/")
+                if len(parts) != 3: raise ValueError("expected /tasks/{id}/{edit|update|heartbeat|stop|retry}")
+                _, task_id, action = parts
+                store = TaskStore()
+                if action == "edit": result = store.edit(task_id, data)
+                elif action in {"update", "heartbeat"}: result = store.update(task_id, data.pop("lease_token", None), data)
+                elif action == "stop":
+                    result = store.stop(task_id)
+                    session = STORE.get(result["progress"].get("session_id", ""))
+                    if session is not None: session.stop_event.set()
+                elif action == "retry": result = store.retry(task_id)
+                else: raise ValueError("unknown task action")
+                self._send_json(result)
+                return
             if parsed.path == "/transcribe/video":
                 result = transcribe_video_url(VideoServiceRequest.from_mapping(data))
                 self._send_json({"ok": True, "result": result.to_dict()})
@@ -127,9 +172,23 @@ class VoiceToTextHandler(BaseHTTPRequestHandler):
                 self._send_json(session.to_dict(), status=HTTPStatus.ACCEPTED)
                 return
             if parsed.path == "/sessions/speaker":
-                session = STORE.create("speaker")
                 request = SpeakerServiceRequest.from_mapping(data)
-                _start_session(session, lambda emit: transcribe_speaker(request, progress=emit, stop_event=session.stop_event))
+                if request.seconds <= 0 or request.chunk_seconds <= 0 or min(
+                    request.model_load_timeout_seconds, request.capture_start_timeout_seconds,
+                    request.flush_timeout_seconds,
+                ) <= 0:
+                    raise ValueError("duration, chunk size, and timeouts must be positive")
+                config = dict(vars(request))
+                config["output_dir"] = str(request.output_dir)
+                session = STORE.create_speaker(config)
+
+                def set_phase(phase: str) -> None:
+                    session.phase = phase
+                    if phase == "capturing":
+                        session.ready_at = time.time()
+
+                _start_session(session, lambda emit: transcribe_speaker(
+                    request, progress=emit, stop_event=session.stop_event, state_callback=set_phase))
                 self._send_json(session.to_dict(), status=HTTPStatus.ACCEPTED)
                 return
             if parsed.path.startswith("/sessions/") and parsed.path.endswith("/stop"):
@@ -142,6 +201,10 @@ class VoiceToTextHandler(BaseHTTPRequestHandler):
                 self._send_json(session.to_dict())
                 return
             self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+        except KeyError:
+            self._send_json({"error": "task not found"}, status=HTTPStatus.NOT_FOUND)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             self._send_error(exc)
 
@@ -186,10 +249,19 @@ def _start_session(session: ServiceSession, work: Any) -> None:
         try:
             result = work(emit)
             session.result = result.to_dict()
-            session.status = "completed"
+            diagnostics = session.result.get("audio_diagnostics", {})
+            if session.result.get("integrity", {}).get("complete") is False:
+                session.status = "incomplete"
+            elif diagnostics.get("status", "ok") != "ok":
+                session.status = "failed"
+                session.error = diagnostics.get("message", "No usable transcript")
+            else:
+                session.status = "completed"
+            session.phase = session.status
         except Exception as exc:
             session.error = str(exc)
             session.status = "failed"
+            session.phase = "failed"
         finally:
             session.finished_at = time.time()
 

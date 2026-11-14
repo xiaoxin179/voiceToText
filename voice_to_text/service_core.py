@@ -12,10 +12,10 @@ import numpy as np
 
 from .asr import AsrWorker, Transcript
 from .audio_capture import AudioCapture, AudioChunk, AudioSource
-from .audio_devices import get_default_microphone, get_default_system_loopback
+from .audio_devices import get_default_microphone, get_default_system_loopback, list_devices, list_loopback_devices
 from .media_downloader import MediaDownloadOptions, MediaDownloadResult, download_media
 from .text_converter import TextMode
-from .video_transcription import VideoTranscriptionOptions, transcribe_platform_video
+from .video_transcription import DeepSeekTokenUsage, VideoTranscriptionOptions, transcribe_platform_video
 
 ProgressCallback = Callable[[str], None]
 
@@ -79,9 +79,9 @@ def download_video_url(
 @dataclass(frozen=True)
 class VideoServiceRequest:
     url: str
-    model_size: str = "tiny"
-    device: str = "cpu"
-    compute_type: str = "int8"
+    model_size: str = "medium"
+    device: str = "cuda"
+    compute_type: str = "float16"
     language: str | None = "zh"
     text_mode: TextMode = "simplified"
     output_dir: Path = Path("transcripts")
@@ -94,9 +94,9 @@ class VideoServiceRequest:
     def from_mapping(cls, data: dict[str, Any]) -> "VideoServiceRequest":
         return cls(
             url=str(data["url"]),
-            model_size=str(data.get("model_size") or data.get("model") or "tiny"),
-            device=str(data.get("device") or "cpu"),
-            compute_type=str(data.get("compute_type") or "int8"),
+            model_size=str(data.get("model_size") or data.get("model") or "medium"),
+            device=str(data.get("device") or "cuda"),
+            compute_type=str(data.get("compute_type") or "float16"),
             language=_normalize_language(data.get("language", "zh")),
             text_mode=_normalize_text_mode(data.get("text_mode", "simplified")),
             output_dir=Path(str(data.get("output_dir") or "transcripts")),
@@ -111,18 +111,20 @@ class VideoServiceRequest:
 class SpeakerServiceRequest:
     seconds: float = 60.0
     source: AudioSource = "system"
-    model_size: str = "tiny"
-    device: str = "cpu"
-    compute_type: str = "int8"
+    model_size: str = "medium"
+    device: str = "cuda"
+    compute_type: str = "float16"
     language: str | None = "zh"
     text_mode: TextMode = "simplified"
     output_dir: Path = Path("transcripts")
-    chunk_seconds: float = 2.0
-    min_rms: float = 0.006
+    chunk_seconds: float = 10.0
+    min_rms: float = 0.001
     vad_filter: bool = True
     silence_stop_seconds: float = 0.0
     model_load_timeout_seconds: float = 180.0
-    flush_timeout_seconds: float = 30.0
+    flush_timeout_seconds: float = 300.0
+    audio_device_index: int | None = None
+    capture_start_timeout_seconds: float = 15.0
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "SpeakerServiceRequest":
@@ -132,18 +134,20 @@ class SpeakerServiceRequest:
         return cls(
             seconds=float(data.get("seconds", data.get("duration_seconds", 60.0))),
             source=source,  # type: ignore[arg-type]
-            model_size=str(data.get("model_size") or data.get("model") or "tiny"),
-            device=str(data.get("device") or "cpu"),
-            compute_type=str(data.get("compute_type") or "int8"),
+            model_size=str(data.get("model_size") or data.get("model") or "medium"),
+            device=str(data.get("device") or "cuda"),
+            compute_type=str(data.get("compute_type") or "float16"),
             language=_normalize_language(data.get("language", "zh")),
             text_mode=_normalize_text_mode(data.get("text_mode", "simplified")),
             output_dir=Path(str(data.get("output_dir") or "transcripts")),
-            chunk_seconds=float(data.get("chunk_seconds", 2.0)),
-            min_rms=float(data.get("min_rms", 0.006)),
+            chunk_seconds=float(data.get("chunk_seconds", 10.0)),
+            min_rms=float(data.get("min_rms", 0.001)),
             vad_filter=bool(data.get("vad_filter", True)),
             silence_stop_seconds=float(data.get("silence_stop_seconds", 0.0)),
             model_load_timeout_seconds=float(data.get("model_load_timeout_seconds", 180.0)),
-            flush_timeout_seconds=float(data.get("flush_timeout_seconds", 30.0)),
+            flush_timeout_seconds=float(data.get("flush_timeout_seconds", 300.0)),
+            audio_device_index=int(data["audio_device_index"]) if data.get("audio_device_index") is not None else None,
+            capture_start_timeout_seconds=float(data.get("capture_start_timeout_seconds", 15.0)),
         )
 
 
@@ -176,13 +180,17 @@ class ServiceTranscriptionResult:
     audio_path: Path | None = None
     optimized_text: str | None = None
     optimized_transcript_path: Path | None = None
+    optimized_token_usage: DeepSeekTokenUsage | None = None
     segments: list[TranscriptSegment] = field(default_factory=list)
     duration_seconds: float | None = None
     logs: list[str] = field(default_factory=list)
+    integrity: dict[str, Any] = field(default_factory=dict)
+    audio_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind,
+            "audio_diagnostics": self.audio_diagnostics,
             "raw_text": self.raw_text,
             "timestamped_text": self.timestamped_text,
             "output_dir": str(self.output_dir),
@@ -191,15 +199,22 @@ class ServiceTranscriptionResult:
             "timestamped_transcript_path": str(self.timestamped_transcript_path),
             "optimized_text": self.optimized_text,
             "optimized_transcript_path": str(self.optimized_transcript_path) if self.optimized_transcript_path else None,
+            "optimized_token_usage": ({
+                "prompt_tokens": self.optimized_token_usage.prompt_tokens,
+                "completion_tokens": self.optimized_token_usage.completion_tokens,
+                "total_tokens": self.optimized_token_usage.total_tokens,
+            } if self.optimized_token_usage is not None else None),
             "segments": [segment.to_dict() for segment in self.segments],
             "duration_seconds": self.duration_seconds,
             "logs": self.logs,
+            "integrity": self.integrity,
         }
 
 
 def transcribe_video_url(
     request: VideoServiceRequest,
     progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
 ) -> ServiceTranscriptionResult:
     logs: list[str] = []
 
@@ -223,6 +238,7 @@ def transcribe_video_url(
             deepseek_model=request.deepseek_model,
         ),
         progress=emit,
+        stop_event=stop_event,
     )
     return ServiceTranscriptionResult(
         kind="video",
@@ -234,6 +250,7 @@ def transcribe_video_url(
         timestamped_transcript_path=result.timestamped_transcript_path,
         optimized_text=result.optimized_text,
         optimized_transcript_path=result.optimized_transcript_path,
+        optimized_token_usage=result.optimized_token_usage,
         logs=logs,
     )
 
@@ -242,11 +259,14 @@ def transcribe_speaker(
     request: SpeakerServiceRequest,
     progress: ProgressCallback | None = None,
     stop_event: threading.Event | None = None,
+    state_callback: Callable[[str], None] | None = None,
 ) -> ServiceTranscriptionResult:
     if request.seconds <= 0:
         raise ValueError("seconds must be greater than 0")
     if request.chunk_seconds <= 0:
         raise ValueError("chunk_seconds must be greater than 0")
+    if min(request.model_load_timeout_seconds, request.capture_start_timeout_seconds, request.flush_timeout_seconds) <= 0:
+        raise ValueError("timeouts must be greater than 0")
 
     logs: list[str] = []
     stop_event = stop_event or threading.Event()
@@ -259,10 +279,17 @@ def transcribe_speaker(
 
     emit(f"准备监听{_source_label(request.source)}音频 {request.seconds:.1f}s")
     device = get_default_system_loopback() if request.source == "system" else get_default_microphone()
+    if request.audio_device_index is not None:
+        devices = list_loopback_devices() if request.source == "system" else list_devices()
+        device = next((item for item in devices if item.index == request.audio_device_index
+                       and item.max_input_channels > 0), None)
+        if device is None:
+            raise ValueError("audio_device_index is not a valid input device for this source")
     emit(f"使用音频设备: {device.name}")
 
-    capture_queue: queue.Queue[AudioChunk] = queue.Queue(maxsize=12)
-    asr_input_queue: queue.Queue[AudioChunk] = queue.Queue(maxsize=8)
+    # Offline transcript sessions preserve every chunk, unlike low-latency GUI queues.
+    capture_queue: queue.Queue[AudioChunk] = queue.Queue()
+    asr_input_queue: queue.Queue[AudioChunk] = queue.Queue()
     transcript_queue: queue.Queue[Transcript] = queue.Queue()
     debug_queue: queue.Queue[Any] = queue.Queue()
 
@@ -279,7 +306,16 @@ def transcribe_speaker(
         text_mode=request.text_mode,
     )
     asr.start()
-    _wait_for_asr_model(asr, request.model_load_timeout_seconds, emit, debug_queue)
+    if state_callback:
+        state_callback("loading_model")
+    try:
+        _wait_for_asr_model(asr, request.model_load_timeout_seconds, emit, debug_queue, stop_event)
+        if stop_event.is_set():
+            raise RuntimeError("session stopped before capture")
+    except Exception:
+        asr.stop()
+        asr.join(timeout=1)
+        raise
 
     capture = AudioCapture(
         source=request.source,
@@ -289,14 +325,49 @@ def transcribe_speaker(
         chunk_seconds=request.chunk_seconds,
     )
     capture.start()
+    if state_callback:
+        state_callback("opening_device")
+    ready_deadline = time.monotonic() + request.capture_start_timeout_seconds
+    while not capture.ready.wait(0.05):
+        if capture.last_error or not capture.is_alive() or stop_event.is_set() or time.monotonic() >= ready_deadline:
+            capture.stop()
+            asr.stop()
+            capture.join(timeout=3)
+            asr.join(timeout=1)
+            raise RuntimeError(capture.last_error or "capture startup cancelled or timed out")
     started_at = time.time()
+    if state_callback:
+        state_callback("capturing")
     emit("扬声器监听已启动" if request.source == "system" else "麦克风监听已启动")
 
     chunks: list[AudioChunk] = []
     transcripts: list[Transcript] = []
     heard_audio = False
+    max_rms = 0.0
+    max_peak = 0.0
+    captured_seconds = 0.0
+    warned_no_audio = False
     last_loud_at = time.monotonic()
     deadline = time.monotonic() + request.seconds
+
+    def record_chunk(chunk: AudioChunk) -> None:
+        nonlocal heard_audio, max_rms, max_peak, captured_seconds, warned_no_audio, last_loud_at
+        chunks.append(chunk)
+        rms = _chunk_rms(chunk)
+        max_rms = max(max_rms, rms)
+        if chunk.samples.size:
+            max_peak = max(max_peak, float(np.max(np.abs(chunk.samples))))
+        captured_seconds += chunk.samples.size / chunk.sample_rate
+        if rms > 0 and rms >= request.min_rms:
+            if not heard_audio:
+                emit(f"AUDIO_DETECTED: 已收到有效音频，rms={rms:.5f}")
+            heard_audio = True
+            last_loud_at = time.monotonic()
+        elif not heard_audio and captured_seconds >= 10 and not warned_no_audio:
+            emit("NO_AUDIO: 前10秒未检测到高于阈值的音频。请检查播放器/标签页/系统应用音量、"
+                 f"浏览器输出设备是否对应当前采集设备 {device.name}，以及 min_rms 设置。")
+            warned_no_audio = True
+        asr_input_queue.put_nowait(chunk)
 
     try:
         while time.monotonic() < deadline and not stop_event.is_set():
@@ -305,17 +376,14 @@ def transcribe_speaker(
             try:
                 chunk = capture_queue.get(timeout=0.1)
             except queue.Empty:
+                if capture.last_error or not capture.is_alive():
+                    break
                 if _silence_limit_reached(request, heard_audio, last_loud_at):
                     emit("检测到持续静音，提前结束监听")
                     break
                 continue
 
-            chunks.append(chunk)
-            rms = _chunk_rms(chunk)
-            if rms >= request.min_rms:
-                heard_audio = True
-                last_loud_at = time.monotonic()
-            _put_latest(asr_input_queue, chunk)
+            record_chunk(chunk)
             if _silence_limit_reached(request, heard_audio, last_loud_at):
                 emit("检测到持续静音，提前结束监听")
                 break
@@ -328,22 +396,17 @@ def transcribe_speaker(
             chunk = capture_queue.get_nowait()
         except queue.Empty:
             break
-        chunks.append(chunk)
-        _put_latest(asr_input_queue, chunk)
+        record_chunk(chunk)
 
     emit("监听结束，等待识别队列完成")
+    if state_callback:
+        state_callback("draining")
     flush_deadline = time.monotonic() + request.flush_timeout_seconds
-    quiet_since: float | None = None
-    while time.monotonic() < flush_deadline:
+    while asr_input_queue.unfinished_tasks and time.monotonic() < flush_deadline:
         _drain_debug(debug_queue, emit)
-        before = len(transcripts)
         _drain_transcripts(transcript_queue, transcripts, emit)
-        if len(transcripts) != before:
-            quiet_since = time.monotonic()
-        if asr_input_queue.empty():
-            quiet_since = quiet_since or time.monotonic()
-            if time.monotonic() - quiet_since >= 1.0:
-                break
+        if not asr.is_alive():
+            break
         time.sleep(0.1)
 
     asr.stop()
@@ -351,15 +414,39 @@ def transcribe_speaker(
     _drain_debug(debug_queue, emit)
     _drain_transcripts(transcript_queue, transcripts, emit)
 
-    if asr.last_error:
-        raise RuntimeError(f"本地 Whisper 识别失败: {asr.last_error}")
     if not chunks:
         raise RuntimeError("没有采集到音频。请确认系统扬声器 loopback 设备可用。")
 
     audio_path = work_dir / "speaker.wav"
     _write_chunks_wav(chunks, audio_path)
+    integrity = {
+        "captured_chunks": len(chunks), "processed_chunks": asr.processed_chunks,
+        "dropped_chunks": capture.dropped_chunks,
+        "complete": asr.processed_chunks == len(chunks) and capture.dropped_chunks == 0
+                    and not capture.last_error and not asr.last_error and not capture.is_alive(),
+        "capture_error": capture.last_error, "asr_error": asr.last_error,
+    }
+    if not integrity["complete"]:
+        emit("WARNING: transcript incomplete; full captured audio retained for recovery")
     segments = _segments_from_transcripts(transcripts, started_at)
     raw_text = "\n".join(segment.text for segment in segments)
+    speech_detected = any(segment.text.strip() and not segment.text.startswith("[ASR error:")
+                          for segment in segments)
+    audio_status = "ok" if heard_audio and speech_detected else "no_speech" if heard_audio else "no_audio"
+    diagnostic_message = {
+        "ok": "已检测到有效音频并识别出文字。",
+        "no_audio": "未检测到高于阈值的有效音频。请检查播放器、标签页和系统应用是否静音，"
+                    "以及浏览器输出设备是否对应当前回环设备；也请核对 min_rms 设置。",
+        "no_speech": "已检测到有效音频，但未识别出文字。音频可能没有语音，或需要检查语言、VAD 与模型设置。",
+    }[audio_status]
+    audio_diagnostics = {
+        "status": audio_status, "message": diagnostic_message,
+        "audio_detected": heard_audio, "speech_detected": speech_detected,
+        "max_rms": max_rms, "max_peak": max_peak, "min_rms": request.min_rms,
+        "selected_device": {"index": device.index, "name": device.name, "host_api": device.host_api},
+    }
+    if audio_status != "ok":
+        emit(f"{audio_status.upper()}: {diagnostic_message}")
     timestamped_text = "\n".join(
         f"[{_format_seconds(segment.start_seconds)} -> {_format_seconds(segment.end_seconds)}] {segment.text}"
         for segment in segments
@@ -381,8 +468,10 @@ def transcribe_speaker(
         raw_transcript_path=raw_path,
         timestamped_transcript_path=timestamped_path,
         segments=segments,
-        duration_seconds=round(time.time() - started_at, 3),
+        duration_seconds=round(sum(chunk.samples.size / chunk.sample_rate for chunk in chunks), 3),
         logs=logs,
+        integrity=integrity,
+        audio_diagnostics=audio_diagnostics,
     )
 
 
@@ -417,10 +506,13 @@ def _wait_for_asr_model(
     timeout_seconds: float,
     emit: ProgressCallback,
     debug_queue: queue.Queue[Any],
+    stop_event: threading.Event | None = None,
 ) -> None:
     emit("加载本地 Whisper 模型")
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("session stopped while loading model")
         _drain_debug(debug_queue, emit)
         if asr.model_ready.wait(timeout=0.2):
             emit("本地 Whisper 模型已就绪")

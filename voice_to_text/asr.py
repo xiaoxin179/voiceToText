@@ -60,6 +60,7 @@ class AsrWorker(threading.Thread):
         self._model = None
         self._text_converter: TextConverter | None = None
         self.last_error: str | None = None
+        self.processed_chunks = 0
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -107,6 +108,8 @@ class AsrWorker(threading.Thread):
                         recognized_at=time.time(),
                     )
                 )
+            self.processed_chunks += 1
+            self.input_queue.task_done()
 
     def _load_model(self):
         if self.device == "cuda":
@@ -130,7 +133,7 @@ class AsrWorker(threading.Thread):
     def _transcribe(self, chunk: AudioChunk) -> str:
         samples = chunk.samples.astype(np.float32, copy=False)
         rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
-        if rms < self.min_rms:
+        if rms <= 0 or rms < self.min_rms:
             self._debug(f"{chunk.source} skipped, rms={rms:.5f} < min_rms={self.min_rms:.5f}")
             return ""
 

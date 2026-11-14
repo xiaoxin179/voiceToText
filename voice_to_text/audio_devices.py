@@ -172,6 +172,19 @@ def resolve_device(
     )
 
 
+def select_input_device(source: str, index: int | None = None) -> AudioDevice:
+    if source not in ("mic", "system"):
+        raise ValueError("source must be mic or system")
+    if index is None:
+        return get_default_microphone() if source == "mic" else get_default_system_loopback()
+    devices = list_loopback_devices() if source == "system" else list_devices()
+    for device in devices:
+        if (device.index == index and device.max_input_channels > 0
+                and device.is_loopback == (source == "system")):
+            return device
+    raise ValueError(f"Device {index} is not a valid {source} input; run devices to list inputs")
+
+
 def format_devices(devices: Iterable[AudioDevice]) -> str:
     rows = [
         "index | in | out | rate | loopback | host api | name",

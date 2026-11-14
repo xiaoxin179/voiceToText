@@ -1,5 +1,17 @@
 # Voice To Text 技术方案
 
+## CLI 与客户端功能对齐
+
+CLI 已补齐客户端的独立文字稿优化、双路设备选择、任务批量添加、筛选分页、结果读取、日志和目录打开。
+两端复用实时启停逻辑；停止时等待尾片识别，自动语言识别和 CPU 默认精度一致。
+完整命令及行为约定见 [CLI 与客户端功能对齐](docs/cli-desktop-parity.md)。
+
+## 转换任务队列
+
+左侧“03 转换任务”支持单条/批量添加链接、编辑、筛选、取消、重试，以及原始稿、时间戳稿、校对稿和总结查看。
+默认切片 10 秒、不保留录音。关闭软件后队列保留。添加后告诉 Codex“处理转换队列”，由 Codex 领取并控制浏览器与转写服务；不会自动启动 Codex。
+CLI、HTTP 接口和执行约定见 [转换任务协议](docs/conversion-tasks.md)。
+
 本项目目标是实现一个 Windows 本地语音转文本工具：启动后可以监听电脑麦克风和系统音频，并将两路音频实时转换成文本。麦克风和系统音频需要作为两条独立输入管道处理，避免先混音后再识别导致说话来源不清晰。
 
 ## 核心目标
@@ -519,6 +531,75 @@ AI 自动化建议：
 3. 轮询 `/sessions/{session_id}?result=1`。
 4. 根据 `status=completed` 后读取 `result.raw_text` 或 `result.timestamped_text`。
 
+## Windows 独立任务栏图标
+
+程序同时为进程和主窗口设置 `xiaoxin.voiceToText.desktop` 应用身份。
+从 ChatGPT 等打包桌面应用直接启动 Python 时，Windows 仍可能继承宿主的应用归属。
+此时通过资源管理器双击独立快捷方式启动，避免与 ChatGPT 合并：
+
+```powershell
+.\scripts\create_desktop_shortcut.ps1
+```
+
+这会在 `scripts` 生成本机专用的 `Voice To Text.lnk`；双击它即可打开 GUI，
+无需激活终端。快捷方式使用绝对脚本路径和工作目录；不会影响 CLI/API 的独立使用。
+启动身份失败会发出警告，不再静默忽略。
+
+## 无界面会话控制（CLI / HTTP）
+
+GUI 和 CLI 是独立任务；CLI 不会改变已打开窗口的控件值。自动化流程建议使用
+`serve` 服务配合 `session` 命令，全程不需要点击转写软件。
+
+```powershell
+python main.py serve --host 127.0.0.1 --port 8765
+
+# 在另一个终端创建任务；标准输出始终为 JSON。
+python main.py session start --config C:\path\to\speaker.json
+python main.py session wait-ready speaker_<id> --timeout 240
+# wait-ready 成功后，再让浏览器从头播放。
+python main.py session status speaker_<id>
+# 视频结束后请求停止，随后等最后一块识别完成。
+python main.py session stop speaker_<id>
+python main.py session wait speaker_<id> --timeout 600
+```
+
+`speaker.json` 示例（每个任务独立设置，参数在任务运行中不能修改）：
+
+```json
+{
+  "source": "system",
+  "seconds": 600,
+  "chunk_seconds": 4,
+  "model": "tiny",
+  "device": "cpu",
+  "compute_type": "int8",
+  "language": "zh",
+  "text_mode": "simplified",
+  "min_rms": 0.001,
+  "vad_filter": true,
+  "silence_stop_seconds": 0,
+  "flush_timeout_seconds": 300,
+  "output_dir": "transcripts"
+}
+```
+
+- `seconds` 从设备打开后计时；`chunk_seconds` 是连续音频分块长度，不是间歇录音。
+- `python main.py devices` 列出设备。可在 JSON 设置 `audio_device_index`，或给
+  `transcribe-speaker` 传 `--audio-device-index`；system 源必须选择 loopback 设备。
+- 状态中 `phase` 依次为 `loading_model`、`opening_device`、`capturing`、`draining`。
+  只有模型和采集设备均已就绪、仍在采集时 `ready=true`。`status=running` 本身不代表可播放。
+- `stop` 是停止请求，仍须 `wait`，不能立即读取最终结果。准备期间也能请求停止；
+  未进入采集的取消任务会返回 `failed` 和原因。同一服务不允许重叠的 speaker 会话。
+- `status=completed` 且 `result.integrity.complete=true` 表示每个采集到的软件音频块均已处理。
+  `incomplete` 会保留音频和部分文字，CLI 退出码为 3；可用 `transcribe-file` 重新识别录音。
+  该指标不能证明上游播放器、操作系统驱动或语音识别模型本身没有遗漏。
+- 会话转写使用无丢弃队列，保留停止时的末尾不足一块的音频；等待识别使用任务完成计数，
+  不再以“队列为空”等同于最后一块处理完成。长时间采集和识别积压仍会占用内存，建议按视频分任务。
+- 会话状态存储于服务进程内，服务重启后不恢复。录音和文字稿保存在输出目录。
+- `--timeout` 只限制 CLI 等待时间，超时不会停止后台任务。可重新查询或明确执行 `session stop`。
+- 本地服务仅应绑定 `127.0.0.1`。浏览器播放、字幕校对和总结由调用方编排；
+  暂不提供 GUI 遥控、暂停/继续或运行中热修改参数。
+
 ## 媒体下载
 
 项目额外提供一个只负责“链接 -> 视频文件”的下载入口，不会启动 Whisper，也不会生成文字稿。底层使用 `yt-dlp` 支持的平台解析能力，适用于 Bilibili、YouTube、TikTok/Douyin、Instagram、X 等其已支持的平台。
@@ -579,6 +660,18 @@ Invoke-RestMethod http://127.0.0.1:8765/sessions/download -Method Post -ContentT
   "url": "https://www.bilibili.com/video/BV..."
 }'
 ```
+
+### 扬声器采集诊断与退出码
+
+`transcribe-speaker --json` 的结果包含 `audio_diagnostics`：
+
+- `status=ok`：检测到高于阈值的音频，并识别出文字。
+- `status=no_audio`：全程没有检测到高于 `min_rms` 阈值的音频。检查播放器、标签页、系统应用音量，以及浏览器输出设备是否与选定回环设备一致；必要时通过 `--audio-device-index` 显式选择。
+- `status=no_speech`：有有效音频，但没有识别出文字。检查音频是否包含语音，以及语言、VAD 和模型设置。
+
+诊断同时返回 `audio_detected`、`speech_detected`、`max_rms`、`max_peak`、`min_rms` 和 `selected_device`。采集到的前 10 秒均低于阈值时会输出警告；之后收到有效音频时会报告 `AUDIO_DETECTED`，不会仅因开头静音而中止任务。
+
+无有效声音或无识别文字时，直接 CLI 返回退出码 **3**，异步会话返回 `failed`，并保留诊断、录音与文字稿路径。队列不完整时仍返回 `incomplete`。`integrity.complete` 只描述采集与处理链路完整性，不等同于转写成功；`ready=true` 只表示采集流已启动，不表示已收到有效声音。
 
 ### OmniGet 参考与许可证说明
 

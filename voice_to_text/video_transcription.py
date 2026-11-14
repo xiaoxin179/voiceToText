@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,6 +19,7 @@ from typing import Callable
 
 from .cuda_runtime import add_cuda_dll_directories
 from .text_converter import TextConverter, TextMode
+from .operation_control import check_cancelled
 
 ProgressCallback = Callable[[str], None]
 
@@ -92,7 +94,9 @@ class VideoTranscriptionResult:
 def transcribe_platform_video(
     options: VideoTranscriptionOptions,
     progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
 ) -> VideoTranscriptionResult:
+    check_cancelled(stop_event)
     progress = progress or (lambda _message: None)
     work_dir = _create_work_dir(options.output_dir)
 
@@ -108,7 +112,8 @@ def transcribe_platform_video(
         saved_audio.write_bytes(audio_path.read_bytes())
 
     progress(f"音频已保存: {saved_audio}")
-    raw_text, timestamped_text = _transcribe_audio(saved_audio, options, progress)
+    check_cancelled(stop_event)
+    raw_text, timestamped_text = _transcribe_audio(saved_audio, options, progress, stop_event)
 
     raw_path = work_dir / "transcript_raw.md"
     timestamped_path = work_dir / "transcript_timestamped.md"
@@ -120,12 +125,14 @@ def transcribe_platform_video(
     optimized_path: Path | None = None
     optimized_usage: DeepSeekTokenUsage | None = None
     if options.optimize_with_deepseek:
+        check_cancelled(stop_event)
         progress("正在调用 DeepSeek 优化文字稿")
         optimization = optimize_transcript_with_deepseek(
             raw_text,
             api_key=options.deepseek_api_key,
             model=options.deepseek_model,
             progress=progress,
+            stop_event=stop_event,
         )
         optimized_text = optimization.text
         optimized_usage = optimization.usage
@@ -513,7 +520,9 @@ def _transcribe_audio(
     audio_path: Path,
     options: VideoTranscriptionOptions,
     progress: ProgressCallback,
+    stop_event: threading.Event | None = None,
 ) -> tuple[str, str]:
+    check_cancelled(stop_event)
     if options.device == "cuda":
         add_cuda_dll_directories()
 
@@ -548,6 +557,7 @@ def _transcribe_audio(
     raw_lines: list[str] = []
     timestamped_lines: list[str] = []
     for segment in segments:
+        check_cancelled(stop_event)
         text = converter.convert(segment.text.strip())
         if not text:
             continue
@@ -576,7 +586,11 @@ def optimize_transcript_with_deepseek(
     api_key: str = "",
     model: str = "deepseek-v4-flash",
     progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
 ) -> DeepSeekOptimizationResult:
+    check_cancelled(stop_event)
+    if not transcript.strip():
+        raise ValueError("文字稿不能为空")
     api_key, base_url = _resolve_deepseek_provider(api_key)
     if not api_key:
         raise RuntimeError(
@@ -587,12 +601,38 @@ def optimize_transcript_with_deepseek(
     optimized_chunks: list[str] = []
     total_usage = DeepSeekTokenUsage()
     for index, chunk in enumerate(chunks, start=1):
+        check_cancelled(stop_event)
         if progress:
             progress(f"DeepSeek 正在优化第 {index}/{len(chunks)} 段")
         optimized_chunk, usage = _call_deepseek(chunk, api_key=api_key, model=model, base_url=base_url)
         optimized_chunks.append(optimized_chunk)
         total_usage = total_usage + usage
-    return DeepSeekOptimizationResult("\n\n".join(optimized_chunks).strip(), total_usage)
+    check_cancelled(stop_event)
+    text = "\n\n".join(optimized_chunks).strip()
+    if not text:
+        raise RuntimeError("DeepSeek 返回了空文字稿，未保存优化结果")
+    return DeepSeekOptimizationResult(text, total_usage)
+
+
+def optimize_transcript_to_file(
+    transcript: str, output_path: Path, *, api_key: str = "",
+    model: str = "deepseek-v4-flash", progress: ProgressCallback | None = None,
+    stop_event: threading.Event | None = None,
+) -> DeepSeekOptimizationResult:
+    """Optimize existing text without downloading or running ASR again."""
+    optimization = optimize_transcript_with_deepseek(
+        transcript, api_key=api_key, model=model, progress=progress, stop_event=stop_event)
+    check_cancelled(stop_event)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # A failed write must not truncate the previously successful optimization.
+    with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".tmp", delete=False) as handle:
+        temporary_path = Path(handle.name)
+    try:
+        temporary_path.write_text(optimization.text, encoding="utf-8")
+        temporary_path.replace(output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return optimization
 
 
 def _resolve_deepseek_provider(api_key: str) -> tuple[str, str]:

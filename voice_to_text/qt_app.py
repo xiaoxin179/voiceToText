@@ -6,7 +6,7 @@ import time
 import os
 import ctypes
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from PyQt6.QtCore import QPointF, QProcess, QRectF, QSize, Qt, QTimer
@@ -30,12 +30,21 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QSpinBox,
     QStackedWidget,
+    QTabWidget,
+    QScrollArea,
+    QToolButton,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from .asr import AsrWorker, Transcript
+from .live_runtime import RuntimeState, compute_default, normalize_language
+from .task_page import TaskQueuePage
+from .ui_theme import APP_STYLE
+from .windows_taskbar import (
+    APP_USER_MODEL_ID, configure_process_identity, configure_window_identity, warn_identity_failure,
+)
 from .audio_capture import AudioCapture, AudioChunk
 from .audio_devices import (
     AudioDevice,
@@ -52,15 +61,14 @@ from .video_transcription import (
     DeepSeekOptimizationResult,
     VideoTranscriptionOptions,
     VideoTranscriptionResult,
-    optimize_transcript_with_deepseek,
+    optimize_transcript_to_file,
     transcribe_platform_video,
 )
 
 APP_TITLE = "实时语音转文字"
-APP_USER_MODEL_ID = "xiaoxin.voiceToText.desktop"
-SWISS_ACCENT = "#002FA7"
-SWISS_BLACK = "#111111"
-SWISS_MUTED = "#6B7280"
+SWISS_ACCENT = "#386CF4"
+SWISS_BLACK = "#24324B"
+SWISS_MUTED = "#8290A6"
 SWISS_RULE = "#D8DDE6"
 
 
@@ -68,9 +76,9 @@ def configure_windows_app_id() -> None:
     if os.name != "nt":
         return
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
-    except Exception:
-        pass
+        configure_process_identity()
+    except Exception as exc:
+        warn_identity_failure(exc)
 
 
 def create_app_icon() -> QIcon:
@@ -147,6 +155,10 @@ def create_line_icon(kind: str, color: str) -> QIcon:
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(icon_color)
         painter.drawPolygon(QPolygonF([QPointF(10.3, 9.2), QPointF(10.3, 14.8), QPointF(15, 12)]))
+    elif kind == "queue":
+        painter.drawRoundedRect(QRectF(5, 4, 14, 16), 2, 2)
+        for y in (8, 12, 16):
+            painter.drawLine(QPointF(9, y), QPointF(16, y))
     elif kind == "settings":
         painter.drawEllipse(QRectF(8.5, 8.5, 7, 7))
         for start, end in (
@@ -165,23 +177,13 @@ def create_line_icon(kind: str, color: str) -> QIcon:
 
 
 @dataclass
-class RuntimeState:
-    audio_queue: queue.Queue[AudioChunk]
-    transcript_queue: queue.Queue[Transcript]
-    debug_queue: queue.Queue[object]
-    asr_worker: AsrWorker
-    capture_threads: list[AudioCapture]
-    capture_started: bool = False
-    last_loading_notice_at: float = 0.0
-
-
-@dataclass
 class VideoRuntimeState:
     progress_queue: queue.Queue[str]
     result_queue: queue.Queue[VideoTranscriptionResult | Exception]
     thread: threading.Thread
     started_at: float
     cancel_requested: bool = False
+    stop_event: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass
@@ -206,8 +208,8 @@ class VoiceToTextWindow(QMainWindow):
         self.app_icon = create_app_icon()
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(self.app_icon)
-        self.resize(1440, 920)
-        self.setMinimumSize(1180, 760)
+        self.resize(1440, 900)
+        self.setMinimumSize(1100, 720)
 
         self.mic_devices: list[AudioDevice] = []
         self.system_devices: list[AudioDevice] = []
@@ -235,28 +237,31 @@ class VoiceToTextWindow(QMainWindow):
     def _build_ui(self) -> None:
         root = QWidget(self)
         root.setObjectName("appRoot")
-        root_layout = QVBoxLayout(root)
-        root_layout.setContentsMargins(20, 20, 20, 12)
-        root_layout.setSpacing(14)
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(28, 24, 28, 14)
+        main_layout.setSpacing(22)
         self.setCentralWidget(root)
 
         header = QFrame()
         header.setObjectName("headerPanel")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(18, 16, 18, 16)
+        header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(16)
 
         brand_icon = QLabel()
         brand_icon.setObjectName("brandIcon")
         brand_icon.setPixmap(self.app_icon.pixmap(40, 40))
         brand_icon.setFixedSize(40, 40)
-        header_layout.addWidget(brand_icon)
+        brand_icon.hide()
 
         title_block = QVBoxLayout()
         title_block.setSpacing(2)
-        title = QLabel(APP_TITLE)
+        self.page_title = title = QLabel("实时转写")
         title.setObjectName("appTitle")
-        subtitle = QLabel("麦克风和系统音频分路采集、分路转写，便于排查每一路输入状态。")
+        self.page_subtitle = subtitle = QLabel("捕捉每一句话，让想法成为文字。")
         subtitle.setObjectName("appSubtitle")
         title_block.addWidget(title)
         title_block.addWidget(subtitle)
@@ -265,6 +270,7 @@ class VoiceToTextWindow(QMainWindow):
         self.status_badge = QLabel("就绪")
         self.status_badge.setObjectName("statusBadge")
         self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_badge.setFixedHeight(28)
         header_layout.addWidget(self.status_badge)
 
         self.voice_header_actions = QWidget()
@@ -308,28 +314,37 @@ class VoiceToTextWindow(QMainWindow):
         video_actions_layout.addWidget(self.video_settings_button)
         header_layout.addWidget(self.video_header_actions)
         self.video_header_actions.hide()
-        root_layout.addWidget(header)
+        main_layout.addWidget(header)
 
         app_body_layout = QHBoxLayout()
         app_body_layout.setSpacing(14)
-        root_layout.addLayout(app_body_layout, stretch=1)
+        main_layout.addLayout(app_body_layout, stretch=1)
 
         nav = QFrame()
         nav.setObjectName("navPanel")
-        nav.setFixedWidth(220)
+        nav.setFixedWidth(196)
         nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(0)
+        nav_layout.setContentsMargins(16, 28, 16, 20)
+        nav_layout.setSpacing(8)
 
-        nav_label = QLabel("工作区")
+        brand = QLabel("  VOICE / STUDIO")
+        brand.setObjectName("navBrand")
+        nav_layout.addWidget(brand)
+        brand_caption = QLabel("  语音与文字工作室")
+        brand_caption.setObjectName("navCaption")
+        nav_layout.addWidget(brand_caption)
+        nav_layout.addSpacing(32)
+        nav_label = QLabel("工作空间")
         nav_label.setObjectName("navLabel")
         nav_layout.addWidget(nav_label)
 
-        self.voice_nav_button = QPushButton("01  语音转写")
-        self.video_nav_button = QPushButton("02  平台视频转写")
-        self.voice_nav_button.setIcon(create_line_icon("mic", SWISS_BLACK))
-        self.video_nav_button.setIcon(create_line_icon("video", SWISS_BLACK))
-        for button in (self.voice_nav_button, self.video_nav_button):
+        self.voice_nav_button = QPushButton("  实时转写")
+        self.video_nav_button = QPushButton("  视频转写")
+        self.task_nav_button = QPushButton("  任务中心")
+        self.voice_nav_button.setIcon(create_line_icon("mic", "#AAB9D4"))
+        self.video_nav_button.setIcon(create_line_icon("video", "#AAB9D4"))
+        self.task_nav_button.setIcon(create_line_icon("queue", "#AAB9D4"))
+        for button in (self.voice_nav_button, self.video_nav_button, self.task_nav_button):
             button.setObjectName("navButton")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setCheckable(True)
@@ -337,17 +352,20 @@ class VoiceToTextWindow(QMainWindow):
         self.voice_nav_button.setChecked(True)
         nav_layout.addWidget(self.voice_nav_button)
         nav_layout.addWidget(self.video_nav_button)
+        nav_layout.addWidget(self.task_nav_button)
         nav_layout.addStretch()
 
-        nav_hint = QLabel("本地 Whisper\nDashScope DeepSeek")
+        nav_hint = QLabel("本地优先 · 隐私随行\nWhisper  /  DeepSeek")
         nav_hint.setObjectName("navHint")
         nav_layout.addWidget(nav_hint)
-        app_body_layout.addWidget(nav)
+        root_layout.addWidget(nav)
+        root_layout.addLayout(main_layout, stretch=1)
 
         self.pages = QStackedWidget()
         app_body_layout.addWidget(self.pages, stretch=1)
         self.pages.addWidget(self._build_voice_page())
         self.pages.addWidget(self._build_video_page())
+        self.pages.addWidget(TaskQueuePage(self))
 
         self.status = QStatusBar(self)
         self.status.setObjectName("bottomStatus")
@@ -362,11 +380,11 @@ class VoiceToTextWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("sidePanel")
-        sidebar.setFixedWidth(400)
+        sidebar.setMinimumWidth(0)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(18, 18, 18, 18)
-        sidebar_layout.setSpacing(16)
-        body_layout.addWidget(sidebar)
+        sidebar_layout.setSpacing(18)
+        body_layout.addWidget(self._scroll_panel(sidebar))
 
         self.listen_mic = QCheckBox("麦克风")
         self.listen_mic.setChecked(True)
@@ -378,9 +396,11 @@ class VoiceToTextWindow(QMainWindow):
         source_row.addStretch()
 
         self.mic_combo = QComboBox()
+        self.mic_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.system_combo = QComboBox()
-        self.mic_combo.setMinimumWidth(310)
-        self.system_combo.setMinimumWidth(310)
+        self.system_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.mic_combo.setMinimumWidth(0)
+        self.system_combo.setMinimumWidth(0)
 
         self.model_combo = QComboBox()
         self.model_combo.addItems(["tiny", "base", "small", "medium", "large-v3"])
@@ -403,7 +423,7 @@ class VoiceToTextWindow(QMainWindow):
 
         self.chunk_seconds = QSpinBox()
         self.chunk_seconds.setRange(1, 10)
-        self.chunk_seconds.setValue(2)
+        self.chunk_seconds.setValue(10)
         self.chunk_seconds.setSuffix(" s")
 
         self.min_rms = QDoubleSpinBox()
@@ -420,7 +440,11 @@ class VoiceToTextWindow(QMainWindow):
         sidebar_layout.addLayout(source_form)
 
         sidebar_layout.addWidget(self._divider())
-        sidebar_layout.addWidget(self._section_title("识别参数", "模型、GPU 和切片设置"))
+        advanced = QWidget()
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(0, 8, 0, 0)
+        sidebar_layout.addWidget(self._disclosure("识别参数", advanced))
+        advanced.hide()
         asr_form = self._make_form()
         asr_form.addRow("模型", self.model_combo)
         asr_form.addRow("设备", self.device_combo)
@@ -429,7 +453,8 @@ class VoiceToTextWindow(QMainWindow):
         asr_form.addRow("文本", self.text_mode_combo)
         asr_form.addRow("切片", self.chunk_seconds)
         asr_form.addRow("静音阈值", self.min_rms)
-        sidebar_layout.addLayout(asr_form)
+        advanced_layout.addLayout(asr_form)
+        sidebar_layout.addWidget(advanced)
         sidebar_layout.addStretch()
 
         status_panel = QFrame()
@@ -437,7 +462,7 @@ class VoiceToTextWindow(QMainWindow):
         status_layout = QVBoxLayout(status_panel)
         status_layout.setContentsMargins(12, 12, 12, 12)
         status_layout.setSpacing(8)
-        status_layout.addWidget(self._section_title("运行状态", "实时队列和采集线程"))
+        status_layout.addWidget(self._section_title("运行概览", "当前采集状态"))
 
         status_grid = QHBoxLayout()
         status_grid.setSpacing(10)
@@ -463,16 +488,14 @@ class VoiceToTextWindow(QMainWindow):
         self.timeline_text.setPlaceholderText("这里按时间顺序合并两路文本")
         self.debug_text.setPlaceholderText("这里显示采集、模型加载和识别调试信息")
 
-        transcript_splitter = QSplitter(Qt.Orientation.Horizontal)
-        transcript_splitter.setObjectName("transcriptSplitter")
-        transcript_splitter.addWidget(self._text_panel("麦克风转写", "MIC", self.mic_text, "micPanel"))
-        transcript_splitter.addWidget(self._text_panel("系统音频转写", "SYSTEM", self.system_text, "systemPanel"))
-        transcript_splitter.setSizes([1, 1])
-
-        workspace.addWidget(transcript_splitter)
-        workspace.addWidget(self._text_panel("合并时间线", "按识别完成时间汇总", self.timeline_text, "timelinePanel"))
-        workspace.addWidget(self._text_panel("调试日志", "采集电平、队列和异常会显示在这里", self.debug_text, "debugPanel"))
-        workspace.setSizes([420, 230, 150])
+        self.transcript_tabs = QTabWidget()
+        self.transcript_tabs.setObjectName("editorTabs")
+        self.transcript_tabs.addTab(self.timeline_text, "全部转写")
+        self.transcript_tabs.addTab(self.mic_text, "麦克风")
+        self.transcript_tabs.addTab(self.system_text, "系统音频")
+        workspace.addWidget(self._editor_workspace(
+            "转写工作台", "TRANSCRIPT", self.transcript_tabs,
+            self.debug_text, "采集与识别日志"))
 
         return page
 
@@ -484,11 +507,11 @@ class VoiceToTextWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("videoSidePanel")
-        sidebar.setFixedWidth(400)
+        sidebar.setMinimumWidth(0)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(18, 18, 18, 18)
         sidebar_layout.setSpacing(14)
-        layout.addWidget(sidebar)
+        layout.addWidget(self._scroll_panel(sidebar))
 
         self.video_url_input = QLineEdit()
         self.video_url_input.setPlaceholderText("粘贴 Bilibili / YouTube / Douyin 等视频链接")
@@ -522,6 +545,7 @@ class VoiceToTextWindow(QMainWindow):
 
         self.video_deepseek_key_input = QLineEdit()
         self.video_deepseek_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.video_deepseek_key_input.setToolTip("????? DASHSCOPE_API_KEY / DEEPSEEK_API_KEY")
         self.video_deepseek_key_input.setPlaceholderText("可留空，默认读取 DASHSCOPE_API_KEY / DEEPSEEK_API_KEY")
 
         self.video_deepseek_model_combo = QComboBox()
@@ -565,13 +589,15 @@ class VoiceToTextWindow(QMainWindow):
         deepseek_form.addRow("操作", self.video_optimize_button)
         sidebar_layout.addLayout(deepseek_form)
 
-        button_row = QHBoxLayout()
-        button_row.setSpacing(10)
-        button_row.addWidget(self.video_download_button)
-        button_row.addWidget(self.video_start_button)
-        button_row.addWidget(self.video_stop_button)
-        button_row.addWidget(self.video_clear_button)
-        sidebar_layout.addLayout(button_row)
+        self.video_download_button.setObjectName("secondaryButton")
+        self.video_download_button.setIcon(create_line_icon("video", SWISS_BLACK))
+        for buttons in ((self.video_start_button, self.video_download_button),
+                        (self.video_stop_button, self.video_clear_button)):
+            button_row = QHBoxLayout()
+            button_row.setSpacing(8)
+            for button in buttons:
+                button_row.addWidget(button)
+            sidebar_layout.addLayout(button_row)
         sidebar_layout.addStretch()
 
         workspace = QSplitter(Qt.Orientation.Vertical)
@@ -585,11 +611,63 @@ class VoiceToTextWindow(QMainWindow):
         self.video_optimized_text.setPlaceholderText("这里显示 DeepSeek 优化后的文字稿")
         self.video_log_text.setPlaceholderText("这里显示下载、识别和 Agent 优化进度")
 
-        workspace.addWidget(self._text_panel("原始文字稿", "LOCAL WHISPER", self.video_raw_text, "videoRawPanel"))
-        workspace.addWidget(self._text_panel("优化文字稿", "DEEPSEEK", self.video_optimized_text, "videoOptimizedPanel"))
-        workspace.addWidget(self._text_panel("处理日志", "DOWNLOAD / ASR / AGENT", self.video_log_text, "videoLogPanel"))
-        workspace.setSizes([360, 300, 170])
+        self.video_tabs = QTabWidget()
+        self.video_tabs.setObjectName("editorTabs")
+        self.video_tabs.addTab(self.video_raw_text, "原始文字稿")
+        self.video_tabs.addTab(self.video_optimized_text, "优化文字稿")
+        workspace.addWidget(self._editor_workspace(
+            "视频文字稿", "VIDEO TRANSCRIPT", self.video_tabs,
+            self.video_log_text, "下载与处理日志"))
         return page
+
+    def _scroll_panel(self, panel: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("settingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(300)
+        panel.setMinimumHeight(panel.minimumSizeHint().height())
+        scroll.setWidget(panel)
+        return scroll
+
+    def _disclosure(self, title: str, content: QWidget) -> QToolButton:
+        toggle = QToolButton()
+        toggle.setObjectName("disclosure")
+        toggle.setText(title)
+        toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toggle.setArrowType(Qt.ArrowType.RightArrow)
+        toggle.setCheckable(True)
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        def changed(checked: bool) -> None:
+            content.setVisible(checked)
+            toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+        toggle.toggled.connect(changed)
+        return toggle
+
+    def _editor_workspace(self, title: str, caption: str, tabs: QTabWidget,
+                          log: QPlainTextEdit, log_title: str) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("editorWorkspace")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(24, 22, 24, 14)
+        layout.setSpacing(16)
+        heading = QHBoxLayout()
+        name = QLabel(title)
+        name.setObjectName("workspaceTitle")
+        tag = QLabel(caption)
+        tag.setObjectName("workspaceCaption")
+        heading.addWidget(name)
+        heading.addStretch()
+        heading.addWidget(tag)
+        layout.addLayout(heading)
+        layout.addWidget(tabs, 1)
+        layout.addWidget(self._divider())
+        layout.addWidget(self._disclosure(log_title, log))
+        log.setMaximumHeight(150)
+        log.hide()
+        layout.addWidget(log)
+        return panel
 
     def _wrap_layout(self, layout: QHBoxLayout) -> QWidget:
         widget = QWidget()
@@ -605,6 +683,7 @@ class VoiceToTextWindow(QMainWindow):
         title_label.setObjectName("sectionTitle")
         subtitle_label = QLabel(subtitle)
         subtitle_label.setObjectName("sectionSubtitle")
+        subtitle_label.setWordWrap(True)
         layout.addWidget(title_label)
         layout.addWidget(subtitle_label)
         return wrapper
@@ -617,6 +696,7 @@ class VoiceToTextWindow(QMainWindow):
 
     def _make_form(self) -> QFormLayout:
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
@@ -671,244 +751,8 @@ class VoiceToTextWindow(QMainWindow):
         return box
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow, QWidget#appRoot {
-                background: #F7F7F8;
-                color: #111111;
-            }
-            QLabel {
-                color: #111111;
-                font-family: "Helvetica Neue", "Microsoft YaHei UI", Arial, sans-serif;
-            }
-            QFrame#headerPanel, QFrame#navPanel, QFrame#sidePanel, QFrame#videoSidePanel,
-            QFrame#micPanel, QFrame#systemPanel, QFrame#timelinePanel, QFrame#debugPanel,
-            QFrame#videoRawPanel, QFrame#videoOptimizedPanel, QFrame#videoLogPanel {
-                background: #FFFFFF;
-                border: 1px solid #D8DDE6;
-                border-radius: 10px;
-            }
-            QFrame#headerPanel {
-                background: #FFFFFF;
-            }
-            QFrame#statusPanel {
-                background: #FFFFFF;
-                border: 1px solid #D8DDE6;
-                border-radius: 10px;
-            }
-            QLabel#brandIcon {
-                background: transparent;
-            }
-            QLabel#appTitle {
-                font-size: 25px;
-                font-weight: 700;
-                letter-spacing: 0;
-            }
-            QLabel#appSubtitle, QLabel#sectionSubtitle, QLabel#panelSubtitle, QLabel#metricLabel {
-                color: #6B7280;
-                font-size: 12px;
-            }
-            QLabel#navLabel {
-                color: #6B7280;
-                font-size: 12px;
-                font-weight: 700;
-                padding: 14px 14px 12px 14px;
-                border-bottom: 1px solid #D8DDE6;
-            }
-            QLabel#navHint {
-                color: #6B7280;
-                background: #FFFFFF;
-                border-top: 1px solid #D8DDE6;
-                padding: 12px 14px;
-                line-height: 18px;
-            }
-            QLabel#sectionTitle, QLabel#panelTitle {
-                font-size: 16px;
-                font-weight: 700;
-            }
-            QLabel#panelSubtitle {
-                font-weight: 600;
-                padding-top: 2px;
-            }
-            QLabel#statusBadge {
-                min-width: 72px;
-                min-height: 36px;
-                padding: 0 14px;
-                border-radius: 18px;
-                font-weight: 700;
-            }
-            QPlainTextEdit {
-                background: #FFFFFF;
-                border: 1px solid #D8DDE6;
-                border-radius: 8px;
-                padding: 12px;
-                selection-background-color: #002FA7;
-                selection-color: #FFFFFF;
-            }
-            QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
-                min-height: 36px;
-                border: 1px solid #D8DDE6;
-                border-radius: 8px;
-                padding: 4px 11px;
-                background: #FFFFFF;
-            }
-            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover, QLineEdit:hover, QPlainTextEdit:hover {
-                border-color: #111111;
-            }
-            QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QLineEdit:focus, QPlainTextEdit:focus {
-                border-color: #002FA7;
-                background: #FFFFFF;
-            }
-            QCheckBox {
-                spacing: 8px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 1px solid #111111;
-                border-radius: 5px;
-                background: #FFFFFF;
-            }
-            QCheckBox::indicator:checked {
-                background: #002FA7;
-                border-color: #002FA7;
-            }
-            QPushButton {
-                min-height: 36px;
-                padding: 0 16px;
-                border: 1px solid #111111;
-                border-radius: 10px;
-                background: #FFFFFF;
-                color: #111111;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #F7F7F8;
-                border-color: #002FA7;
-                color: #002FA7;
-            }
-            QPushButton:disabled {
-                color: #A0A7B2;
-                background: #F7F7F8;
-                border-color: #D8DDE6;
-            }
-            QPushButton#primaryButton {
-                color: #FFFFFF;
-                background: #002FA7;
-                border-color: #002FA7;
-            }
-            QPushButton#primaryButton:hover {
-                color: #FFFFFF;
-                background: #111111;
-                border-color: #111111;
-            }
-            QPushButton#dangerButton {
-                color: #6B7280;
-                background: #F7F7F8;
-                border-color: #D8DDE6;
-            }
-            QPushButton#dangerButton:hover {
-                color: #111111;
-                background: #FFFFFF;
-                border-color: #111111;
-            }
-            QPushButton#primaryButton:disabled, QPushButton#dangerButton:disabled {
-                color: #A0A7B2;
-                background: #F7F7F8;
-                border-color: #D8DDE6;
-            }
-            QPushButton#settingsButton {
-                padding: 0;
-                min-width: 40px;
-                max-width: 46px;
-                border-radius: 20px;
-            }
-            QPushButton#navButton {
-                min-height: 52px;
-                text-align: left;
-                padding-left: 14px;
-                padding-right: 14px;
-                border-radius: 0;
-                font-weight: 700;
-                background: #FFFFFF;
-                border: 0;
-                border-bottom: 1px solid #D8DDE6;
-                color: #111111;
-            }
-            QPushButton#navButton:hover {
-                background: #F7F7F8;
-                color: #002FA7;
-            }
-            QPushButton#navButton:checked {
-                color: #FFFFFF;
-                background: #002FA7;
-            }
-            QFrame#divider {
-                color: #D8DDE6;
-                background: #D8DDE6;
-                max-height: 1px;
-            }
-            QFrame#metric {
-                background: #FFFFFF;
-                border: 1px solid #D8DDE6;
-                border-radius: 8px;
-            }
-            QLabel#metricValue {
-                color: #002FA7;
-                font-size: 18px;
-                font-weight: 700;
-            }
-            QLabel#usageToast {
-                background: #111111;
-                color: #FFFFFF;
-                border: 1px solid #111111;
-                border-radius: 12px;
-                padding: 12px 16px;
-                font-weight: 700;
-            }
-            QComboBox::drop-down {
-                width: 26px;
-                border: 0;
-            }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 11px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: #D8DDE6;
-                border-radius: 0;
-                min-height: 34px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #111111;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0;
-            }
-            QScrollBar:horizontal {
-                background: transparent;
-                height: 11px;
-                margin: 0;
-            }
-            QScrollBar::handle:horizontal {
-                background: #D8DDE6;
-                border-radius: 0;
-                min-width: 34px;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0;
-            }
-            QSplitter::handle {
-                background: #F7F7F8;
-            }
-            QStatusBar#bottomStatus {
-                background: #F7F7F8;
-                border-top: 1px solid #D8DDE6;
-                color: #6B7280;
-            }
-            """
-        )
+        self.setFont(QFont("Microsoft YaHei UI", 10))
+        self.setStyleSheet(APP_STYLE)
 
     def _set_status(self, message: str, tone: str = "idle") -> None:
         self.status.showMessage(message)
@@ -921,15 +765,15 @@ class VoiceToTextWindow(QMainWindow):
             "working": "处理中",
         }
         colors = {
-            "idle": ("#FFFFFF", "#111111", "#D8DDE6"),
-            "loading": ("#F7F7F8", "#002FA7", "#002FA7"),
-            "running": ("#002FA7", "#FFFFFF", "#002FA7"),
+            "idle": ("#EAF5F0", "#267858", "#EAF5F0"),
+            "loading": ("#F7F7F8", "#386CF4", "#386CF4"),
+            "running": ("#386CF4", "#FFFFFF", "#386CF4"),
             "stopped": ("#F7F7F8", "#6B7280", "#D8DDE6"),
             "error": ("#FFFFFF", "#E4002B", "#E4002B"),
-            "working": ("#002FA7", "#FFFFFF", "#002FA7"),
+            "working": ("#386CF4", "#FFFFFF", "#386CF4"),
         }
         background, foreground, border = colors.get(tone, colors["idle"])
-        self.status_badge.setText(labels.get(tone, "就绪"))
+        self.status_badge.setText("●  " + labels.get(tone, "就绪"))
         self.status_badge.setStyleSheet(
             f"background: {background}; color: {foreground}; border: 1px solid {border};"
         )
@@ -984,6 +828,7 @@ class VoiceToTextWindow(QMainWindow):
     def _connect_events(self) -> None:
         self.voice_nav_button.clicked.connect(lambda: self.switch_page(0))
         self.video_nav_button.clicked.connect(lambda: self.switch_page(1))
+        self.task_nav_button.clicked.connect(lambda: self.switch_page(2))
         self.start_button.clicked.connect(self.start_listening)
         self.stop_button.clicked.connect(self.stop_listening)
         self.clear_button.clicked.connect(self.clear_transcripts)
@@ -1044,23 +889,33 @@ class VoiceToTextWindow(QMainWindow):
         self._set_video_inputs_enabled(self.video_runtime is None and self.video_agent_runtime is None)
 
     def switch_page(self, index: int) -> None:
+        titles = (("实时转写", "捕捉每一句话，让想法成为文字。"),
+                  ("视频转写", "从视频链接到清晰、可阅读的文字稿。"),
+                  ("任务中心", "集中管理转写任务与每一份成果。"))
+        self.page_title.setText(titles[index][0])
+        self.page_subtitle.setText(titles[index][1])
         self.pages.setCurrentIndex(index)
         self.voice_nav_button.setChecked(index == 0)
         self.video_nav_button.setChecked(index == 1)
+        self.task_nav_button.setChecked(index == 2)
         if index == 0:
             self.voice_header_actions.show()
             self.video_header_actions.hide()
             self._set_status("语音转写", "idle" if not self.runtime else "running")
-        else:
+        elif index == 1:
             self.voice_header_actions.hide()
             self.video_header_actions.show()
             self._set_status("平台视频转写", "idle" if not self.video_runtime else "working")
+        else:
+            self.voice_header_actions.hide()
+            self.video_header_actions.hide()
+            self._set_status("转换任务", "idle")
 
     def _sync_compute_default(self, device: str) -> None:
-        self.compute_combo.setCurrentText("int8" if device == "cpu" else "float16")
+        self.compute_combo.setCurrentText(compute_default(device))
 
     def _sync_video_compute_default(self, device: str) -> None:
-        self.video_compute_combo.setCurrentText("int8" if device == "cpu" else "float16")
+        self.video_compute_combo.setCurrentText(compute_default(device))
 
     def refresh_devices(self, *, check_hotplug: bool = False) -> None:
         try:
@@ -1141,7 +996,7 @@ class VoiceToTextWindow(QMainWindow):
         transcript_queue: queue.Queue[Transcript] = queue.Queue()
         debug_queue: queue.Queue[object] = queue.Queue()
         language = self.language_combo.currentText()
-        language_value = None if language == "auto" else language
+        language_value = normalize_language(language)
 
         asr_worker = AsrWorker(
             input_queue=audio_queue,
@@ -1200,24 +1055,12 @@ class VoiceToTextWindow(QMainWindow):
 
     def stop_listening(self) -> None:
         runtime = self.runtime
-        if not runtime:
+        if not runtime or runtime.stopping:
             return
-
-        for capture in runtime.capture_threads:
-            capture.stop()
-        runtime.asr_worker.stop()
-
-        def join_threads() -> None:
-            for capture_thread in runtime.capture_threads:
-                capture_thread.join(timeout=2.0)
-            runtime.asr_worker.join(timeout=2.0)
-
-        threading.Thread(target=join_threads, daemon=True).start()
-        self.runtime = None
-        self._set_running_ui(False)
-        self.append_debug("已停止监听")
-        self._update_metrics(0, 0, "-")
-        self._set_status("已停止", "stopped")
+        runtime.request_stop()
+        self.stop_button.setEnabled(False)
+        self.append_debug("正在停止采集，等待最后一片音频识别完成")
+        self._set_status("正在保存最后的转写内容…", "working")
 
     def _set_running_ui(self, running: bool) -> None:
         self.start_button.setEnabled(not running)
@@ -1254,7 +1097,7 @@ class VoiceToTextWindow(QMainWindow):
             return
 
         language = self.video_language_combo.currentText()
-        language_value = None if language == "auto" else language
+        language_value = normalize_language(language)
         options = VideoTranscriptionOptions(
             url=url,
             model_size=self.video_model_combo.currentText(),
@@ -1269,17 +1112,18 @@ class VoiceToTextWindow(QMainWindow):
 
         progress_queue: queue.Queue[str] = queue.Queue()
         result_queue: queue.Queue[VideoTranscriptionResult | Exception] = queue.Queue()
+        stop_event = threading.Event()
 
         def worker() -> None:
             try:
-                result = transcribe_platform_video(options, progress=progress_queue.put)
+                result = transcribe_platform_video(options, progress=progress_queue.put, stop_event=stop_event)
             except Exception as exc:
                 result_queue.put(exc)
             else:
                 result_queue.put(result)
 
         thread = threading.Thread(target=worker, name="video-transcription-worker", daemon=True)
-        self.video_runtime = VideoRuntimeState(progress_queue, result_queue, thread, time.time())
+        self.video_runtime = VideoRuntimeState(progress_queue, result_queue, thread, time.time(), stop_event=stop_event)
         self.video_result = None
         self.video_raw_text.clear()
         self.video_optimized_text.clear()
@@ -1334,6 +1178,7 @@ class VoiceToTextWindow(QMainWindow):
         if not runtime:
             return
         runtime.cancel_requested = True
+        runtime.stop_event.set()
         self.video_stop_button.setEnabled(False)
         self.append_video_log("已请求停止。后台任务会在当前下载或识别步骤结束后退出显示。")
         self._set_status("正在停止平台视频转写", "stopped")
@@ -1356,13 +1201,13 @@ class VoiceToTextWindow(QMainWindow):
 
         def worker() -> None:
             try:
-                optimization = optimize_transcript_with_deepseek(
+                optimization = optimize_transcript_to_file(
                     raw_text,
+                    optimized_path,
                     api_key=api_key,
                     model=model,
                     progress=progress_queue.put,
                 )
-                optimized_path.write_text(optimization.text, encoding="utf-8")
             except Exception as exc:
                 result_queue.put(exc)
             else:
@@ -1419,6 +1264,20 @@ class VoiceToTextWindow(QMainWindow):
 
         self._drain_debug(runtime)
 
+        if runtime.stopping:
+            while not runtime.transcript_queue.empty():
+                self.append_transcript(runtime.transcript_queue.get_nowait())
+            if runtime.stopped.is_set():
+                self.runtime = None
+                self._set_running_ui(False)
+                self._update_metrics(0, 0, "-")
+                if runtime.shutdown_error:
+                    self.append_debug(runtime.shutdown_error)
+                self._set_status("已停止；请检查日志" if runtime.shutdown_error else "已停止", "stopped")
+                if getattr(self, "_close_after_stop", False):
+                    self.close()
+            return
+
         if not runtime.asr_worker.is_alive():
             error = runtime.asr_worker.last_error
             self.stop_listening()
@@ -1432,11 +1291,18 @@ class VoiceToTextWindow(QMainWindow):
             )
             return
 
-        if runtime.asr_worker.model_ready.is_set() and not runtime.capture_started:
-            for capture in runtime.capture_threads:
-                capture.start()
-            runtime.capture_started = True
-            self.append_debug("模型已就绪，开始采集音频")
+        try:
+            was_started = runtime.capture_started
+            runtime.start_capture_if_ready()
+            if runtime.capture_started and not was_started:
+                self.append_debug("模型已就绪，开始采集音频")
+            if runtime.capture_started:
+                runtime.check_capture()
+        except RuntimeError as exc:
+            runtime.shutdown_error = str(exc)
+            self.append_debug(str(exc))
+            self.stop_listening()
+            return
 
         if not runtime.capture_started:
             elapsed = int(time.time() - self.started_at)
@@ -1615,7 +1481,11 @@ class VoiceToTextWindow(QMainWindow):
         self.video_log_text.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {line}")
 
     def closeEvent(self, event) -> None:
-        self.stop_listening()
+        if self.runtime:
+            self._close_after_stop = True
+            self.stop_listening()
+            event.ignore()
+            return
         self.stop_video_transcription()
         self.video_agent_runtime = None
         self.media_download_runtime = None
@@ -1625,6 +1495,8 @@ class VoiceToTextWindow(QMainWindow):
 def main() -> int:
     configure_windows_app_id()
     app = QApplication([])
+    app.setStyle("Fusion")
+    app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setApplicationName(APP_TITLE)
     app.setApplicationDisplayName(APP_TITLE)
     app.setWindowIcon(create_app_icon())
@@ -1640,5 +1512,9 @@ def main() -> int:
         return 2
 
     window = VoiceToTextWindow()
+    try:
+        configure_window_identity(int(window.winId()))
+    except Exception as exc:
+        warn_identity_failure(exc)
     window.show()
     return app.exec()

@@ -9,3 +9,4 @@ transcripts/
 build/
 dist/
 *.spec
+scripts/*.lnk

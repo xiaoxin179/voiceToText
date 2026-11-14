@@ -71,6 +71,9 @@ class AudioCapture(threading.Thread):
         self.chunk_seconds = chunk_seconds
         self.target_sample_rate = target_sample_rate
         self._stop_event = threading.Event()
+        self.ready = threading.Event()
+        self.last_error: str | None = None
+        self.dropped_chunks = 0
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -100,16 +103,17 @@ class AudioCapture(threading.Thread):
             except queue.Full:
                 try:
                     self.output_queue.get_nowait()
+                    self.output_queue.task_done()
                     dropped += 1
+                    self.dropped_chunks += 1
                 except queue.Empty:
                     continue
 
     def run(self) -> None:
-        pyaudio = _load_pyaudio()
-
         pa = None
         stream = None
         try:
+            pyaudio = _load_pyaudio()
             with _PORTAUDIO_OPEN_LOCK:
                 pa = pyaudio.PyAudio()
                 device = resolve_device(
@@ -146,10 +150,10 @@ class AudioCapture(threading.Thread):
                         self._debug(f"open failed with channels={candidate_channels}: {exc}")
 
                 if stream is None:
-                    self._debug("capture error: no supported channel count worked")
-                    return
+                    raise RuntimeError("no supported channel count worked")
 
             self._debug("capture started")
+            self.ready.set()
             frames: list[bytes] = []
             frame_count = 0
             started_at = time.time()
@@ -185,7 +189,16 @@ class AudioCapture(threading.Thread):
                     frames = []
                     frame_count = 0
                     started_at = time.time()
+            # Keep the final partial chunk when a caller stops between boundaries.
+            if frames:
+                self._put_latest_chunk(AudioChunk(
+                    source=self.source, started_at=started_at, ended_at=time.time(),
+                    sample_rate=self.target_sample_rate,
+                    samples=resample_linear(bytes_to_mono_float32(b"".join(frames), channels),
+                                            source_rate, self.target_sample_rate),
+                ))
         except Exception as exc:
+            self.last_error = str(exc)
             self._debug(f"capture error: {exc}")
         finally:
             if stream is not None:

@@ -1,0 +1,2 @@
+# Install into the project's configured Python environment before building.
+PyInstaller==6.21.0

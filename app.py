@@ -1,4 +1,4 @@
-from voice_to_text.qt_app import main
+from voice_to_text.desktop_runtime import main
 
 
 if __name__ == "__main__":

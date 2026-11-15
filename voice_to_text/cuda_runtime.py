@@ -10,6 +10,8 @@ _DLL_HANDLES = []
 
 def candidate_cuda_dll_dirs() -> list[Path]:
     roots: list[Path] = []
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys._MEIPASS))
     try:
         roots.extend(Path(path) for path in site.getsitepackages())
     except Exception:

@@ -6,6 +6,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -54,6 +55,12 @@ def database_path() -> Path:
     if configured:
         return Path(configured).expanduser().resolve()
     return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local" / "share"))) / "VoiceToText" / "tasks.sqlite3"
+
+
+def default_task_output_dir() -> Path:
+    root = (Path.home() / "Documents" / "VoiceToText" if getattr(sys, "frozen", False)
+            else Path(__file__).resolve().parents[1])
+    return root / "transcripts" / "tasks"
 
 
 def extract_urls(text: str) -> list[str]:
@@ -157,7 +164,7 @@ class TaskStore:
             raise ValueError("请填写一条有效的 http/https 视频链接")
         url = urls[0]
         task_id = "task_" + uuid.uuid4().hex[:12]
-        output_root = Path(data.get("output_dir") or Path(__file__).resolve().parents[1] / "transcripts" / "tasks").expanduser().resolve()
+        output_root = Path(data.get("output_dir") or default_task_output_dir()).expanduser().resolve()
         if not isinstance(data.get("config", {}), dict): raise ValueError("config must be an object")
         config = {**DEFAULT_CONFIG, **data.get("config", {})}
         validate_config(config)

@@ -1,5 +1,12 @@
 # Voice To Text 技术方案
 
+## Windows 客户端下载
+
+从 [GitHub Releases](https://github.com/xiaoxin179/voiceToText/releases/latest) 下载
+`VoiceStudio-1.0.0-windows-x64.zip`，完整解压后双击 `VoiceToText.exe`。
+包含 EXE 和运行库，不需要 Python、Conda 或常驻 BAT 窗口；请保留整个解压目录。
+模型及 NVIDIA 驱动要求见下文，发布包不包含识别模型。
+
 ## Agent Skill 安装
 
 项目自带配套 [voice-to-text-cli Skill](skills/voice-to-text-cli/SKILL.md)，与 CLI 一起维护。GUI 和手动 CLI 不需要安装 Skill；希望 Codex 等 Agent 按项目约定执行转写、录音和队列操作时，建议安装。
@@ -696,3 +703,31 @@ Invoke-RestMethod http://127.0.0.1:8765/sessions/download -Method Post -ContentT
 下载服务的产品方向和浏览器到本地服务的桥接思路，参考了 [OmniGet](https://github.com/tonhowtf/omniget) 的公开设计。OmniGet 使用 `yt-dlp` 覆盖 1,800+ 站点，并通过浏览器扩展将已捕获的媒体 URL、Referer、Cookie/请求头交给本地应用；这也是本项目后续适配受登录态限制平台时应持续关注的上游实现。
 
 本项目没有复制、链接或捆绑 OmniGet 的 GPL-3.0 源代码；这里的下载模块是独立实现，仅调用 `yt-dlp`。因此本段是来源说明和技术参考，不代表本项目是 OmniGet 的派生代码。请遵守平台条款、版权及当地法律，仅下载你有权访问和保存的内容。
+# 独立 Windows APP
+
+打包版使用 `VoiceToText.exe` 启动，不需要激活 Conda、运行 Python 或保留 BAT 控制台窗口。
+桌面快捷方式“语音转文字”和开始菜单“Voice Studio”指向安装目录中的 EXE。
+旧桌面 BAT 在安装时会备份并改为启动 EXE 后立即退出，便于沿用原来的操作习惯。
+
+```powershell
+# 在具备项目依赖和 PyInstaller 的 Python 环境中构建
+pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File scripts/build_windows_app.ps1
+
+# 安装到当前用户，无需管理员权限，并创建桌面/开始菜单快捷方式
+powershell -ExecutionPolicy Bypass -File scripts/install_windows_app.ps1
+
+# 将完整程序目录打包为 Release ZIP，并生成 SHA-256 校验文件
+python scripts/package_windows_release.py --version 1.0.0
+```
+
+构建产物位于 `dist/windows-app/VoiceToText/`，安装位置是 `%LOCALAPPDATA%/Programs/VoiceToText/`。
+该目录包含 EXE、Python/Qt/GPU 运行库及 FFmpeg、yt-dlp 辅助工具，移动时需保留整个目录。
+采用目录形式以避免每次启动都解压大型 GPU 库；桌面快捷方式可直接双击。
+打包规格和构建脚本保存在 `packaging/`、`scripts/`，可按源码版本重新构建。
+
+模型沿用用户已有的 Hugging Face 缓存，不重复打包；换电脑时仍需准备模型和对应的 NVIDIA 驱动。
+程序结果默认写入用户文档中的 `VoiceToText/`，任务数据库沿用 `%LOCALAPPDATA%/VoiceToText/`。
+无控制台时的输出写入该目录的 `desktop.log`，启动异常写入 `desktop-error.log` 并弹窗提示。
+可用 `VoiceToText.exe --diagnose <绝对路径.json>` 检查音频设备、GPU 推理、工具与客户端窗口。
+

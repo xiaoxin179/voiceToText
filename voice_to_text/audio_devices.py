@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 from dataclasses import asdict, dataclass
 from typing import Iterable
 
@@ -74,6 +76,19 @@ def device_fingerprint(devices: Iterable[AudioDevice]) -> tuple[tuple[object, ..
 
 
 def list_devices_in_fresh_process() -> list[AudioDevice]:
+    if getattr(sys, "frozen", False):
+        # A frozen EXE is not a Python interpreter. Re-enter its helper mode
+        # rather than recursively opening the GUI with unsupported `-m` args.
+        with tempfile.TemporaryDirectory(prefix="vtt-devices-") as folder:
+            output = Path(folder) / "devices.json"
+            completed = subprocess.run(
+                [sys.executable, "--scan-audio-devices", str(output)],
+                capture_output=True, timeout=15, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if completed.returncode != 0 or not output.is_file():
+                raise RuntimeError("音频设备扫描失败，请查看应用日志后重试。")
+            return [AudioDevice(**item) for item in json.loads(output.read_text(encoding="utf-8"))]
     completed = subprocess.run(
         [sys.executable, "-m", "voice_to_text.audio_devices", "--json"],
         capture_output=True,
@@ -81,6 +96,7 @@ def list_devices_in_fresh_process() -> list[AudioDevice]:
         encoding="utf-8",
         timeout=15,
         check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()

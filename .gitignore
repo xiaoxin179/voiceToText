@@ -9,4 +9,5 @@ transcripts/
 build/
 dist/
 *.spec
+!packaging/*.spec
 scripts/*.lnk

@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QWidget, QDialog, QVBoxLayout, QHBoxLayout, QFormLa
     QDialogButtonBox, QMessageBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QTabWidget, QComboBox, QSplitter, QFrame, QTextBrowser, QToolButton, QSizePolicy)
 
-from .task_store import TaskStore, STATUS_LABELS, PHASE_LABELS, TERMINAL, ACTIVE, extract_urls, read_task_artifact
+from .task_store import TaskStore, STATUS_LABELS, PHASE_LABELS, TERMINAL, ACTIVE, extract_urls, read_task_artifact, default_task_output_dir
 
 
 from .ui_theme import APP_STYLE, QUEUE_STYLE
@@ -71,7 +71,7 @@ class TaskEditDialog(QDialog):
         self.urls.setMaximumHeight(110)
         self.title = QLineEdit()
         self.title.setPlaceholderText("可留空，由 Codex 从视频页面读取")
-        self.output = QLineEdit(str(Path(__file__).resolve().parents[1] / "transcripts" / "tasks"))
+        self.output = QLineEdit(str(default_task_output_dir()))
         self.instructions = QPlainTextEdit()
         self.instructions.setPlaceholderText("例如：保留专业术语；总结为问题、观点和行动项")
         self.instructions.setMaximumHeight(90)

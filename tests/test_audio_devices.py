@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import json
+from pathlib import Path
 from unittest.mock import patch
 
 from voice_to_text.audio_devices import (
@@ -41,6 +43,21 @@ def device_info(index: int, name: str, *, loopback: bool) -> dict:
 
 
 class ResolveDeviceTests(unittest.TestCase):
+    def test_frozen_scan_uses_headless_helper_and_result_file(self) -> None:
+        def run(args, **kwargs):
+            self.assertEqual(args[1], "--scan-audio-devices")
+            self.assertNotIn("-m", args)
+            Path(args[2]).write_text(json.dumps([{
+                "index": 1, "name": "Loopback", "host_api": "WASAPI",
+                "max_input_channels": 2, "max_output_channels": 0,
+                "default_sample_rate": 48000, "is_loopback": True,
+            }]), encoding="utf-8")
+            return type("Completed", (), {"returncode": 0})()
+        with patch("sys.frozen", True, create=True), patch("voice_to_text.audio_devices.subprocess.run", side_effect=run):
+            devices = list_devices_in_fresh_process()
+        self.assertEqual(len(devices), 1)
+        self.assertTrue(devices[0].is_loopback)
+
     def test_remaps_stale_loopback_index_instead_of_opening_microphone(self) -> None:
         requested = AudioDevice(
             index=20,
